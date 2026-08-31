@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Convo Hist",
-  "version": "0.1.6",
+  "version": "0.1.9",
   "description": "Local-first ChatGPT conversation archive: capture, index, search, export.",
   "minimum_chrome_version": "116",
   "permissions": [

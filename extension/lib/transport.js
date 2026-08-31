@@ -9,7 +9,7 @@
 //
 // BUILD stamp is logged at import so stale-code confusion dies forever.
 
-export const BUILD = 'v0.1.6-multiselect';
+export const BUILD = 'v0.1.9-cache';
 
 const ORIGIN = 'https://chatgpt.com';
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -122,6 +122,10 @@ async function apiGet(path, { allowProxy = true } = {}) {
     return data;
   } catch (directErr) {
     if (!allowProxy) throw directErr;
+    // A 4xx WITH a status is an authoritative answer (auth, forbidden, not
+    // found) — the SW would repeat the identical request and get the same
+    // result. Only fall back for network-level failures and 5xx.
+    if (directErr.status && directErr.status < 500) throw directErr;
     stage(`direct failed — ${directErr.message}`);
     const data = await fetchViaServiceWorker(path);
     stage('← ok (service worker)');

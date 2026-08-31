@@ -13,6 +13,7 @@ import { buildAllIndexes } from '../lib/indexes.js';
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
+import { loadState, saveList, saveDiffMap, setDiffEntry } from '../lib/state.js';
 
 const BATCH = 50;
 
@@ -40,6 +41,7 @@ const loadAllBtn = $('load-all-btn');
 let conversations = []; // normalized summaries
 let capturedIds = new Set(); // already on disk (badge)
 let checkedIds = new Set(); // selected for batch capture
+let diffIndex = {}; // id -> updated ISO — the browser-side refresh index
 let nextOffset = 0;
 let hasMore = false;
 let loadingList = false; // in-flight guard: one list request at a time
@@ -103,13 +105,23 @@ async function captureAll() {
       return;
     }
 
-    // Existing archive: id -> updated (ISO) for change detection.
-    const { envelopes } = await readArchiveEnvelopes();
-    const archivedUpdated = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
+    // Refresh index: prefer the browser-side diff index; fall back to reading
+    // every envelope off disk when it's cold (first run / cache cleared).
+    let archivedUpdated;
+    if (Object.keys(diffIndex).length) {
+      archivedUpdated = new Map(Object.entries(diffIndex));
+    } else {
+      const { envelopes } = await readArchiveEnvelopes();
+      archivedUpdated = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
+      diffIndex = Object.fromEntries(archivedUpdated);
+      await saveDiffMap(diffIndex);
+    }
 
     let captured = 0;
     let unchanged = 0;
     let failed = 0;
+    let consecutiveFails = 0; // circuit breaker: 3 in a row => stop hammering
+    const failures = []; // {title, message} — first few surface in the status
     let indexNote = '';
 
     for (let i = 0; i < summaries.length; i++) {
@@ -131,15 +143,33 @@ async function captureAll() {
         capturedIds.add(c.id);
         checkedIds.delete(c.id);
         captured++;
+        consecutiveFails = 0;
+        diffIndex[c.id] = env.updated || env.created || '';
+        setDiffEntry(c.id, diffIndex[c.id]);
       } catch (e) {
         // Auth/Cloudflare failures abort the whole batch — retries won't help.
         if (e && (e.status === 401 || e.status === 403)) {
+          console.error(`[convo-hist ${BUILD}] batch stopped at "${c.title}" (${c.id}): ${e.message}`);
           setStatus(`Batch stopped: ${e.message}`, 'err');
           return;
         }
+        const msg = e && e.message ? e.message : String(e);
+        console.warn(`[convo-hist ${BUILD}] capture failed: "${c.title}" (${c.id}) — ${msg}`);
+        if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
         failed++;
+        consecutiveFails++;
+        if (consecutiveFails >= 3) {
+          setStatus(
+            `Capture paused: 3 conversations failed in a row (last: ${c.title} — ${msg}). ` +
+              'Check the panel console; fix the cause, then run Capture all again to resume.',
+            'err'
+          );
+          return;
+        }
       }
-      await sleep(300); // polite pacing for the unofficial API
+      // Rate-limited? back off well beyond normal pacing before the next item.
+      const lastErr = failures.length && failures[failures.length - 1];
+      await sleep(300 + (/429/.test(lastErr || '') ? 3000 : 0));
     }
 
     // One index + search rebuild for the whole batch.
@@ -154,8 +184,11 @@ async function captureAll() {
     }
 
     const stopped = bulkAbort ? ' (stopped early)' : '';
+    const reasonNote = failed
+      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
+      : '';
     setStatus(
-      `Bulk capture done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}.`,
+      `Bulk capture done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
     renderList();
@@ -177,6 +210,15 @@ document.addEventListener('DOMContentLoaded', init);
 async function init() {
   onStage((msg) => setStatus(msg));
   setStatus(`Ready — build ${BUILD}`);
+
+  // Open instantly with the last-known list while the live refresh runs.
+  const st = await loadState();
+  diffIndex = st.diff || {};
+  if (st.list && st.list.length) {
+    conversations = st.list;
+    renderList();
+    setStatus(`${conversations.length} conversations (cached) — refreshing…`, 'warn');
+  }
 
   captureBtn.addEventListener('click', captureChecked);
   moreBtn.addEventListener('click', () => loadConversations(nextOffset, true));
@@ -306,6 +348,7 @@ async function loadConversations(offset, append) {
       `${conversations.length}${total ? ` of ${total}` : ''} conversations loaded.`,
       'ok'
     );
+    saveList(conversations); // list cache for instant next open
     return true;
   } catch (err) {
     listEl.innerHTML =
@@ -449,6 +492,8 @@ async function captureChecked() {
     let captured = 0;
     let unchanged = 0;
     let failed = 0;
+    let consecutiveFails = 0; // circuit breaker: 3 in a row => stop hammering
+    const failures = []; // {title, message} — first few surface in the status
     let indexNote = '';
 
     for (let i = 0; i < targets.length; i++) {
@@ -470,14 +515,31 @@ async function captureChecked() {
         capturedIds.add(c.id);
         checkedIds.delete(c.id);
         captured++;
+        consecutiveFails = 0;
+        diffIndex[c.id] = env.updated || env.created || '';
+        setDiffEntry(c.id, diffIndex[c.id]);
       } catch (e) {
         if (e && (e.status === 401 || e.status === 403)) {
+          console.error(`[convo-hist ${BUILD}] batch stopped at "${c.title}" (${c.id}): ${e.message}`);
           setStatus(`Batch stopped: ${e.message}`, 'err');
           return;
         }
+        const msg = e && e.message ? e.message : String(e);
+        console.warn(`[convo-hist ${BUILD}] capture failed: "${c.title}" (${c.id}) — ${msg}`);
+        if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
         failed++;
+        consecutiveFails++;
+        if (consecutiveFails >= 3) {
+          setStatus(
+            `Capture paused: 3 conversations failed in a row (last: ${c.title} — ${msg}). ` +
+              'Check the panel console; fix the cause, then run Capture selected again to resume.',
+            'err'
+          );
+          return;
+        }
       }
-      await sleep(300);
+      const lastErr = failures.length && failures[failures.length - 1];
+      await sleep(300 + (/429/.test(lastErr || '') ? 3000 : 0));
       updateCaptureButton();
     }
 
@@ -492,8 +554,11 @@ async function captureChecked() {
     }
 
     const stopped = bulkAbort ? ' (stopped early)' : '';
+    const reasonNote = failed
+      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
+      : '';
     setStatus(
-      `Batch done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}.`,
+      `Batch done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
@@ -576,6 +641,11 @@ async function rebuildFromDisk() {
     const { files } = await writeDerivedViews(indexes);
     searchState = buildSearchIndex(envelopes);
     archivedCount = envelopes.length;
+    // Resync the browser-side diff index from the authoritative envelopes —
+    // this heals drift (hand edits, deletions, another machine's captures).
+    diffIndex = {};
+    for (const e of envelopes) diffIndex[e.id] = e.updated || e.created || '';
+    await saveDiffMap(diffIndex);
     setStatus(
       `Indexes rebuilt: ${files} files from ${envelopes.length} conversations` +
         (skipped ? ` (${skipped} unreadable skipped)` : ''),
@@ -611,6 +681,8 @@ async function capture(chatId) {
 
     const paths = await writeArchiveFile(env, md);
     capturedIds.add(chatId);
+    diffIndex[chatId] = env.updated || env.created || '';
+    setDiffEntry(chatId, diffIndex[chatId]);
     renderList();
 
     // Keep indexes/ and the search index in sync with every capture.
