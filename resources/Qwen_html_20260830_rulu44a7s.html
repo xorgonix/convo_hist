@@ -1,0 +1,22 @@
+<div class="card bg-base-200 border border-warning">
+    <div class="card-body">
+        <h3 class="card-title text-sm text-warning">🍺 The Coach's Take</h3>
+        <div class="mb-2">
+            <span class="font-bold text-xs uppercase text-base-content/60">Critique:</span>
+            <p class="text-sm">{{ .Result.Critique }}</p>
+        </div>
+        <div class="bg-base-300 p-3 rounded-box mb-2 border-l-4 border-primary">
+            <span class="font-bold text-xs uppercase text-base-content/60">I would have sent:</span>
+            <p class="text-lg font-medium mt-1">{{ .Result.RewrittenMessage }}</p>
+            <button
+                class="btn btn-xs btn-primary mt-2"
+                hx-on:click="document.getElementById('content').value = '{{ .Result.RewrittenMessage }}'; document.getElementById('content').focus();">
+                Use This Message
+            </button>
+        </div>
+        <div>
+            <span class="font-bold text-xs uppercase text-base-content/60">Why it works:</span>
+            <p class="text-sm">{{ .Result.Explanation }}</p>
+        </div>
+    </div>
+</div>

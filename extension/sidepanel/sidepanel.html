@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Convo Hist</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Convo&nbsp;Hist <span id="build-label" class="build">build: loading…</span></div>
+    <button id="folder-btn" class="ghost" title="Choose the archive folder on disk">
+      <span id="folder-label">Choose folder…</span>
+    </button>
+  </header>
+
+  <section class="searchbar">
+    <div class="searchrow">
+      <input id="search" type="search" placeholder="Search your archive…" autofocus />
+      <button id="reload-btn" class="ghost" title="Reload conversation list">↻</button>
+    </div>
+    <span id="search-hint" class="hint">message-level search · filters: user: assistant: code:</span>
+  </section>
+
+  <section class="list-tools">
+    <label class="selall"><input type="checkbox" id="sel-all" /> Select all</label>
+    <span id="sel-count" class="hint">0 selected</span>
+    <span class="spacer"></span>
+    <button id="load-all-btn" class="ghost" hidden title="Fetch every page of the conversation list">Load all</button>
+  </section>
+
+  <main id="chat-list" class="list" role="listbox" aria-label="Conversations"></main>
+
+  <section class="actions">
+    <button id="capture-btn" class="primary" disabled>Capture selected</button>
+    <button id="capture-all-btn" class="ghost" title="Crawl every page: capture new + changed conversations">Capture all</button>
+    <button id="rebuild-btn" class="ghost" title="Regenerate indexes/ from the files on disk">Rebuild from disk</button>
+    <button id="more-btn" class="ghost" hidden>Load more</button>
+  </section>
+
+  <footer id="status" class="status">Ready.</footer>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
