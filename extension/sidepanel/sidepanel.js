@@ -83,6 +83,7 @@ async function init() {
   downloadBtn.addEventListener('click', downloadAll);
   exportBtn.addEventListener('click', exportTrigger);
   settingsBtn.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') }));
+  $('help-btn').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('help/help.html') }));
   moreBtn.addEventListener('click', () => loadConversations(nextOffset, true));
   searchEl.addEventListener('input', () => {
     const q = searchEl.value.trim();
