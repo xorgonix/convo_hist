@@ -31,26 +31,29 @@
     <div class="card">
       <h2>Folders</h2>
       <div class="row">
-        <label>Library (downloaded JSON)</label>
+        <label>Library — downloaded thread JSON</label>
         <button id="library-btn" class="ghost">Choose folder…</button>
         <span id="library-label" class="path">not set</span>
+        <button id="library-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
       </div>
-      <div class="note">One file per thread: <code>threads/&lt;Title&gt; (&lt;id&gt;).json</code> — the source of truth.</div>
+      <div class="note">One file per thread: <code>threads/&lt;Title&gt; (&lt;id&gt;).json</code>. "Test" writes a marker file (<code>_convo_hist_here.txt</code>) into the folder so you can see exactly where it is in Explorer.</div>
       <div class="row">
-        <label>Vault / Obsidian (markdown)</label>
+        <label>Vault / Obsidian (markdown only)</label>
         <button id="vault-btn" class="ghost">Choose folder…</button>
         <span id="vault-label" class="path">not set</span>
+        <button id="vault-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
       </div>
       <div class="row">
-        <label>Extra output folder</label>
+        <label>Second output folder (optional)</label>
         <button id="plain-btn" class="ghost">Choose folder…</button>
         <span id="plain-label" class="path">not set</span>
         <select id="plain-format">
           <option value="md">markdown</option>
           <option value="json">JSON</option>
         </select>
+        <button id="plain-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
       </div>
-      <div class="note">Exports also copy here as markdown or JSON — useful for backups or non-Obsidian pipelines.</div>
+      <div class="note">Exports copy here too, as markdown or JSON — for backups or non-Obsidian pipelines.</div>
     </div>
 
     <div class="card">
@@ -72,15 +75,6 @@
       <div class="row">
         <label>Ollama model</label>
         <input type="text" id="ollama-model" placeholder="(auto-detect first installed)" />
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Data</h2>
-      <div class="row">
-        <label>JSON backups in vault</label>
-        <input type="checkbox" id="json-toggle" />
-        <span class="note">Also mirror each envelope JSON into the vault's chats/ (default off — the library holds the JSON).</span>
       </div>
     </div>
 

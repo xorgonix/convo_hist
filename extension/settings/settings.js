@@ -1,18 +1,18 @@
 // settings.js — the settings window. Folders are granted here (File System
-// Access pickers need a user gesture — these buttons are it); LLM/algorithm
-// choices persist in chrome.storage via lib/state.js.
+// Access pickers need a user gesture — these buttons are it); the "Test"
+// button writes a marker file so the user can confirm exactly which folder
+// each grant points at (the API cannot reveal full paths).
 
 import { BUILD } from '../lib/transport.js';
-import { loadState, saveSettings, getIncludeJson, setIncludeJson } from '../lib/state.js';
+import { loadState, saveSettings } from '../lib/state.js';
 import {
-  getLibraryHandle, forgetLibraryHandle, libraryStatus,
-  getArchiveHandle, forgetArchiveHandle, archiveStatus,
-  getPlainHandle, forgetPlainHandle, plainStatus,
+  getLibraryHandle, libraryStatus, writeVerifyProbe,
+  getArchiveHandle, archiveStatus,
+  getPlainHandle, plainStatus,
 } from '../lib/fsaccess.js';
 
 const $ = (id) => document.getElementById(id);
-const buildEl = $('build-label');
-buildEl.textContent = BUILD;
+$('build-label').textContent = BUILD;
 
 const statusEl = $('status');
 function setStatus(text, kind = '') {
@@ -20,7 +20,7 @@ function setStatus(text, kind = '') {
   statusEl.className = 'status ' + kind;
 }
 
-async function paintFolder(btnId, labelId, statusFn, getter, forgetFn, what) {
+function wireFolder(btnId, verifyId, labelId, statusFn, getter, what) {
   $(btnId).addEventListener('click', async () => {
     try {
       await getter({ interactive: true });
@@ -31,7 +31,27 @@ async function paintFolder(btnId, labelId, statusFn, getter, forgetFn, what) {
       setStatus(`${what} folder error: ${e.message}`, 'err');
     }
   });
+  $(verifyId).addEventListener('click', async () => {
+    try {
+      const handle = await getter({ interactive: true });
+      if (!handle) {
+        setStatus(`${what} folder not set yet — click Choose folder first.`, 'warn');
+        return;
+      }
+      const name = await writeVerifyProbe(handle);
+      setStatus(`Wrote _convo_hist_here.txt into "${name}" — check it in Explorer.`, 'ok');
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      setStatus(`Verify failed: ${e.message}`, 'err');
+    }
+  });
 }
+
+wireFolder('library-btn', 'library-verify', 'library-label', libraryStatus, getLibraryHandle, 'Library');
+wireFolder('vault-btn', 'vault-verify', 'vault-label', archiveStatus, getArchiveHandle, 'Vault');
+wireFolder('plain-btn', 'plain-verify', 'plain-label', plainStatus, getPlainHandle, 'Output');
+
+$('close-btn').addEventListener('click', () => window.close());
 
 async function refresh() {
   const lib = await libraryStatus();
@@ -45,20 +65,12 @@ async function refresh() {
     (plain.state === 'needs-permission' ? `${plain.name} (re-grant)` : 'not set');
 }
 
-paintFolder('library-btn', 'library-label', libraryStatus, getLibraryHandle, forgetLibraryHandle, 'Library');
-paintFolder('vault-btn', 'vault-label', archiveStatus, getArchiveHandle, forgetArchiveHandle, 'Vault');
-paintFolder('plain-btn', 'plain-label', plainStatus, getPlainHandle, forgetPlainHandle, 'Output');
-
-$('close-btn').addEventListener('click', () => window.close());
-
-// Restore + wire the plain-format choice and summarizer settings.
 (async () => {
   const st = await loadState();
   $('plain-format').value = st.plainFormat || 'md';
   $('summarizer').value = st.summarizer || 'auto';
   $('ollama-url').value = st.ollamaUrl || 'http://localhost:11434';
   $('ollama-model').value = st.ollamaModel || '';
-  $('json-toggle').checked = await getIncludeJson();
 
   const persist = () => saveSettings({
     plainFormat: $('plain-format').value,
@@ -72,10 +84,6 @@ $('close-btn').addEventListener('click', () => window.close());
       setStatus('Settings saved.', 'ok');
     });
   }
-  $('json-toggle').addEventListener('change', async () => {
-    await setIncludeJson($('json-toggle').checked);
-    setStatus($('json-toggle').checked ? 'JSON backups ON.' : 'JSON backups OFF.', 'ok');
-  });
 
   await refresh();
   setStatus('Settings ready.', 'ok');

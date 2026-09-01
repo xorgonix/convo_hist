@@ -10,6 +10,13 @@
 import { idbGet, idbSet, idbDel } from './idb.js';
 import { baseName } from './naming.js';
 
+// Test-hook (documented, APPROACH.md §6): e2e pages grant all three folders
+// non-interactively — the polyfilled showDirectoryPicker needs no gesture,
+// and this keeps tests deterministic without UI-specific clicking.
+const IS_E2E = (() => {
+  try { return new URLSearchParams(location.search).has('e2e'); } catch { return false; }
+})();
+
 const HANDLE_KEY = 'archiveHandle';     // the vault/Obsidian folder
 const LIBRARY_KEY = 'libraryHandle';    // the downloaded-JSON folder
 const PLAIN_KEY = 'plainHandle';        // optional plain output folder
@@ -166,6 +173,17 @@ export async function writePlainFile(env, md, format /* 'md' | 'json' */) {
   await w.write(format === 'json' ? JSON.stringify(env, null, 2) : md);
   await w.close();
   return `${base}.${format}`;
+}
+
+// Verify-location probe: writes a marker file so the user can confirm in
+// Explorer exactly which folder this handle points at (the File System Access
+// API cannot reveal full paths — this is the trustworthy alternative).
+export async function writeVerifyProbe(handle) {
+  const fh = await handle.getFileHandle('_convo_hist_here.txt', { create: true });
+  const w = await fh.createWritable();
+  await w.write('Convo Hist writes files into this folder.\nDelete this file whenever you like.\n');
+  await w.close();
+  return handle.name;
 }
 
 export async function getArchiveHandle({ interactive = false } = {}) {

@@ -34,12 +34,9 @@
   <main id="chat-list" class="list" role="listbox" aria-label="Conversations"></main>
 
   <section class="actions">
-    <button id="capture-btn" class="primary" title="Crawl every page and download new/changed threads into the browser store">Download all</button>
-    <button id="export-selected-btn" class="ghost" disabled title="Write the checked threads' markdown to the vault folder">Export selected</button>
-    <button id="capture-all-btn" class="ghost" title="Export every downloaded thread's markdown to the vault folder">Export all</button>
-    <button id="digest-btn" class="ghost" title="Summarize + tag downloaded threads that lack it">Digest</button>
-    <label class="jsonopt"><input type="checkbox" id="json-toggle" /> JSON backups</label>
-    <button id="rebuild-btn" class="ghost" title="Regenerate indexes + search from the browser store (imports vault JSON if present)">Rebuild</button>
+    <button id="capture-btn" class="primary" title="Download new + changed threads from ChatGPT into the library folder">Download</button>
+    <button id="capture-all-btn" class="ghost" title="Write the selected threads (or all) to the vault folder as markdown">Export</button>
+    <button id="digest-btn" class="ghost" title="Summarize + tag library threads that lack it">Digest</button>
     <button id="more-btn" class="ghost" hidden>Load more</button>
   </section>
 

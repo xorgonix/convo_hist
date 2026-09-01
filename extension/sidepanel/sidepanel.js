@@ -1,17 +1,20 @@
-// sidepanel.js — v0.4.0-library: the user-approved two-folder flow.
+// sidepanel.js — v0.5.0: library-first, minimal buttons.
 //
-//   STAGE 1 DOWNLOAD: ChatGPT -> LIBRARY FOLDER (visible directory you set in
-//   Settings). One thread = one JSON file: <library>/threads/<Title> (<id>).json
-//   Auto-runs on panel open. Paced, honors retry-after, self-throttling,
-//   resumable.
+//   THE PANEL LIST IS THE LIBRARY. A line item means the JSON file exists
+//   in the library folder. Nothing else is listed.
 //
-//   STAGE 2 EXPORT: library JSON -> vault folder (markdown with frontmatter)
-//   and optional extra output folder (markdown or JSON per setting).
-//   Before each export the library JSON is compared against ChatGPT's list —
-//   stale ones are refreshed first.
+//   DOWNLOAD: crawl ChatGPT's list -> write new/changed threads into
+//   <library>/threads/<Title> (<id>).json. Paced, honors retry-after,
+//   self-throttling, resumable.
 //
-//   Row icons: 📄J copies the thread's JSON to the clipboard, 📄M copies
-//   freshly-rendered markdown. ⚙ opens the Settings window.
+//   EXPORT: selected threads (or all if none selected) -> vault folder as
+//   markdown (frontmatter built from the envelope) and, if configured, a
+//   second output folder as markdown or JSON. Before writing, each thread
+//   is compared against the live ChatGPT list and refreshed if stale.
+//
+//   DIGEST: fills summary + tags on library threads in place.
+//
+//   No index files. No JSON in the vault. No extra buttons.
 
 import {
   normalizeConversationSummary,
@@ -23,14 +26,11 @@ import {
   getArchiveHandle, writeArchiveFile, archiveStatus,
   getLibraryHandle, libraryStatus,
   getPlainHandle, writePlainFile, plainStatus,
-  readArchiveEnvelopes, readLibraryEnvelopes,
-  writeDerivedViews,
+  readLibraryEnvelopes, writeLibraryThread,
 } from '../lib/fsaccess.js';
-import { buildAllIndexes } from '../lib/indexes.js';
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
-import { loadState, saveList, saveDiffMap, setDiffEntry } from '../lib/state.js';
 import { digestTurns } from '../lib/summarize.js';
 
 const BATCH = 50;
@@ -40,9 +40,8 @@ $('build-label').textContent = BUILD;
 
 const listEl = $('chat-list');
 const searchEl = $('search');
-const downloadBtn = $('capture-btn'); // primary: Download all
-const exportSelBtn = $('export-selected-btn');
-const exportAllBtn = $('capture-all-btn'); // Export all + doubles as Stop
+const downloadBtn = $('capture-btn');    // primary: Download
+const exportBtn = $('capture-all-btn');  // Export (selected, or all)
 const moreBtn = $('more-btn');
 const statusEl = $('status');
 const folderBtn = $('folder-btn');
@@ -50,19 +49,19 @@ const folderLabel = $('folder-label');
 const settingsBtn = $('settings-btn');
 const libraryHint = $('library-hint');
 const reloadBtn = $('reload-btn');
-const rebuildBtn = $('rebuild-btn');
 const digestBtn = $('digest-btn');
 const selAllEl = $('sel-all');
 const selCountEl = $('sel-count');
 const loadAllBtn = $('load-all-btn');
 
-let conversations = []; // normalized summaries from the live list
+let libraryEnvs = [];      // the library: every downloaded thread (the list)
 let exportedIds = new Set(); // in the vault (badge)
-let checkedIds = new Set(); // selected for export
-let nextOffset = 0;
+let checkedIds = new Set();  // selected for export
+let conversations = [];      // last crawled ChatGPT summaries (staleness checks)
 let hasMore = false;
+let nextOffset = 0;
 let loadingList = false;
-let searchState = null; // search index over library threads
+let searchState = null;
 let archivedCount = 0;
 let bulkRunning = false;
 let bulkAbort = false;
@@ -82,8 +81,7 @@ async function init() {
   setStatus(`Ready — build ${BUILD}`);
 
   downloadBtn.addEventListener('click', downloadAll);
-  exportSelBtn.addEventListener('click', exportChecked);
-  exportAllBtn.addEventListener('click', exportAllTrigger);
+  exportBtn.addEventListener('click', exportTrigger);
   settingsBtn.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') }));
   moreBtn.addEventListener('click', () => loadConversations(nextOffset, true));
   searchEl.addEventListener('input', () => {
@@ -95,12 +93,11 @@ async function init() {
   reloadBtn.addEventListener('click', async () => {
     checkedIds.clear();
     updateButtons();
-    await loadConversations(0, false);
+    await loadLibrary(); // re-read the library folder
   });
-  rebuildBtn.addEventListener('click', rebuildFromLibrary);
   digestBtn.addEventListener('click', digestMissing);
   selAllEl.addEventListener('change', () => {
-    if (selAllEl.checked) for (const c of conversations) checkedIds.add(c.id);
+    if (selAllEl.checked) for (const env of libraryEnvs) checkedIds.add(env.id);
     else checkedIds.clear();
     renderList();
   });
@@ -110,26 +107,18 @@ async function init() {
     const btn = e.target.closest('[data-copy]');
     if (btn) {
       e.stopPropagation();
-      await copyThread(btn.getAttribute('data-copy'), btn.getAttribute('data-copy') ? btn.dataset.fmt : '');
+      await copyThread(btn.getAttribute('data-copy'), btn.dataset.fmt);
       return;
     }
     const open = e.target.closest('[data-open]');
     if (open) chrome.tabs.create({ url: `https://chatgpt.com/c/${open.getAttribute('data-open')}` });
   });
 
-  const st = await loadState();
-  if (st.list && st.list.length) {
-    conversations = st.list;
-    renderList();
-    setStatus(`${conversations.length} conversations (cached) — refreshing…`, 'warn');
-  }
-
   await refreshFolderStatus();
   await refreshLibraryStatus();
-  await refreshSearchIndex();
-  await loadConversations(0, false);
+  await loadLibrary();
 
-  // STAGE 1 auto-starts. e2e pages skip it for deterministic tests.
+  // Download auto-starts. e2e pages skip it for deterministic tests.
   if (!isE2e()) downloadAll();
 }
 
@@ -176,46 +165,37 @@ async function chooseFolder() {
   }
 }
 
+// THE LIST IS THE LIBRARY. Read every downloaded JSON and render it.
+async function loadLibrary() {
+  const { envelopes, noLibrary } = await readLibraryEnvelopes();
+  libraryEnvs = envelopes.sort((a, b) =>
+    (b.updated || b.created || '').localeCompare(a.updated || a.created || ''));
+  searchState = buildSearchIndex(libraryEnvs);
+  archivedCount = libraryEnvs.length;
+  renderList();
+  setStatus(`${libraryEnvs.length} threads in the library.`, 'ok');
+}
+
+// ChatGPT list pages — used by the download crawl and staleness checks only.
 async function loadConversations(offset, append) {
   if (loadingList) return true;
   loadingList = true;
-
   try {
-    if (!append) {
-      listEl.innerHTML = '<div class="notice">Loading conversations…</div>';
-    }
-    setStatus('Loading conversations…');
-
     const data = await listConversations(offset, BATCH);
     const items = (data && data.items) || [];
     const normalized = items.map(normalizeConversationSummary);
-
     if (append) {
       const seen = new Set(conversations.map((c) => c.id));
       for (const c of normalized) {
-        if (!seen.has(c.id)) {
-          conversations.push(c);
-          seen.add(c.id);
-        }
+        if (!seen.has(c.id)) { conversations.push(c); seen.add(c.id); }
       }
     } else {
       conversations = normalized;
     }
-
     nextOffset = offset + BATCH;
-    const total = data && typeof data.total === 'number' ? data.total : null;
-    hasMore = items.length === BATCH && (total === null || nextOffset < total);
-
-    moreBtn.hidden = !hasMore;
-    renderList();
-    setStatus(`Found ${total ?? conversations.length} · ${conversations.length} listed.`, 'ok');
-    saveList(conversations);
+    hasMore = items.length === BATCH;
     return true;
   } catch (err) {
-    listEl.innerHTML =
-      `<div class="notice">Could not load conversations.<br>` +
-      `<span class="diag">${escapeHtml(err && err.message ? err.message : String(err))}</span><br><br>` +
-      `If this persists, right-click the panel → Inspect → Console,<br>and paste the red lines to the console chat.</div>`;
     setStatus(`List failed: ${err && err.message ? err.message : String(err)}`, 'err');
     return false;
   } finally {
@@ -234,7 +214,7 @@ async function loadAll() {
       if (!ok) break;
       if (hasMore) await sleep(300);
     }
-    setStatus(`${conversations.length} conversations loaded (all pages).`, 'ok');
+    setStatus(`${conversations.length} conversations found (all pages).`, 'ok');
   } finally {
     loadAllBtn.disabled = false;
     loadAllBtn.textContent = 'Load all';
@@ -243,7 +223,7 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------------------
-// STAGE 1 — DOWNLOAD: ChatGPT -> library folder (one JSON per thread).
+// DOWNLOAD: ChatGPT -> library folder.
 
 async function fetchAllSummaries() {
   const all = new Map();
@@ -270,8 +250,6 @@ async function downloadAll() {
     return;
   }
 
-  // The library grant needs a user gesture — this click is one. If it's not
-  // granted yet, the picker opens right here.
   const lib = await getLibraryHandle({ interactive: true }).catch(() => null);
   if (!lib) {
     setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
@@ -281,10 +259,8 @@ async function downloadAll() {
 
   bulkRunning = true;
   bulkAbort = false;
-  exportAllBtn.textContent = 'Stop';
-  exportSelBtn.disabled = true;
+  exportBtn.textContent = 'Stop';
   moreBtn.hidden = true;
-  rebuildBtn.disabled = true;
   digestBtn.disabled = true;
   loadAllBtn.disabled = true;
 
@@ -295,11 +271,9 @@ async function downloadAll() {
       setStatus('No conversations found.', 'warn');
       return;
     }
-    setStatus(`Found ${summaries.length} · checking what's already in the library…`);
+    setStatus(`Found ${summaries.length} · checking the library…`);
 
-    // Library diff: id -> updated ISO from the JSON files on disk.
-    const { envelopes } = await readLibraryEnvelopes();
-    const libUpdated = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
+    const libUpdated = new Map(libraryEnvs.map((e) => [e.id, e.updated || e.created || '']));
     const targets = summaries.filter((c) => {
       const have = libUpdated.get(c.id);
       return !have || !c.updated || c.updated > have;
@@ -310,7 +284,7 @@ async function downloadAll() {
     let failed = 0;
     let consecutiveFails = 0;
     let pacing = 400;
-    let recentFails = 0; // failures within the last 10 items — rate governor
+    let recentFails = 0;
     let recentCount = 0;
     const failures = [];
 
@@ -322,14 +296,13 @@ async function downloadAll() {
       try {
         const raw = await getConversation(c.id);
         const env = buildEnvelope(normalizeConversation(raw));
-        const path = await writeLibraryThread(env);
-        diffIndexPut(c.id, env.updated || env.created || '');
+        await writeLibraryThread(env);
         downloaded++;
         consecutiveFails = 0;
       } catch (e) {
         if (e && (e.status === 401 || e.status === 403)) {
           console.error(`[convo-hist ${BUILD}] download stopped at "${c.title}" (${c.id}): ${e.message}`);
-          setStatus(`Download stopped: ${e.message} — log in on chatgpt.com, then run Download all again.`, 'err');
+          setStatus(`Download stopped: ${e.message} — log in on chatgpt.com, then run Download again.`, 'err');
           return;
         }
         const msg = e && e.message ? e.message : String(e);
@@ -338,8 +311,6 @@ async function downloadAll() {
         failed++;
         consecutiveFails++;
         recentFails++;
-        // Rate governor: two failures in any 10-item window => slow down hard.
-        // Server-provided retry-after (429) is honored exactly.
         if (recentFails >= 2 && pacing < 8000) {
           pacing = Math.min(pacing * 2, 8000);
           console.warn(`[convo-hist ${BUILD}] throttling: pacing raised to ${pacing}ms (rate limiter active)`);
@@ -348,7 +319,7 @@ async function downloadAll() {
         if (consecutiveFails >= 3) {
           setStatus(
             `Download paused: 3 in a row failed (last: ${c.title} — ${msg}). ` +
-              `Everything downloaded is safe in the library; run Download all again to resume.`,
+              `Downloaded threads are safe in the library; run Download again to resume.`,
             'err'
           );
           return;
@@ -363,136 +334,103 @@ async function downloadAll() {
       await sleep(pacing);
     }
 
-    const stopped = bulkAbort ? ' (stopped early — run Download all again to resume)' : '';
+    await loadLibrary(); // the list IS the library — refresh it
+
+    const stopped = bulkAbort ? ' (stopped early — run Download again to resume)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
     setStatus(
       `Download done: ${downloaded} new, ${unchanged} unchanged, ${failed} failed — ` +
-        `library holds ${envelopes.length + downloaded} threads${stopped}${reasonNote}.`,
+        `library holds ${libraryEnvs.length} threads${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
-    await refreshSearchIndex();
   } catch (e) {
     setStatus(`Download failed: ${e.message}`, 'err');
   } finally {
     bulkRunning = false;
     bulkAbort = false;
-    downloadBtn.textContent = 'Download all';
-    rebuildBtn.disabled = false;
+    downloadBtn.textContent = 'Download';
     updateButtons();
-    renderList();
   }
 }
 
-// Small in-memory diff-index mirror (persisted via state.js, best-effort).
-function diffIndexPut(id, updated) {
-  setDiffEntry(id, updated); // fire-and-forget
-}
-
 // ---------------------------------------------------------------------------
-// STAGE 2 — EXPORT: library JSON -> vault (markdown) + optional plain folder.
+// EXPORT: library -> vault markdown (+ optional second output folder).
 
-function exportAllTrigger() {
+function exportTrigger() {
   if (bulkRunning) {
     bulkAbort = true;
     setStatus('Stopping after the current export…', 'warn');
     return;
   }
-  exportTargets(null);
-}
-
-async function exportChecked() {
-  if (bulkRunning) return;
-  const targets = conversations.filter((c) => checkedIds.has(c.id));
-  if (!targets.length) return;
-  exportTargets(targets);
+  // Selected threads win; otherwise everything in the library.
+  const selected = libraryEnvs.filter((env) => checkedIds.has(env.id));
+  exportTargets(selected.length ? selected : libraryEnvs);
 }
 
 async function exportTargets(targets) {
-  // Grants must happen inside the click gesture.
   const vault = await getArchiveHandle({ interactive: true }).catch(() => null);
   if (!vault) {
     setStatus('No vault folder granted — click 📁 (or ⚙ Settings).', 'err');
     return;
   }
   await refreshFolderStatus();
-  const plain = await getPlainHandle({ interactive: true }).catch(() => null); // optional
+  const plain = await getPlainHandle({ interactive: true }).catch(() => null);
   const st = await loadState();
   const plainFormat = st.plainFormat || 'md';
 
-  if (!targets) {
-    const { envelopes, noLibrary } = await readLibraryEnvelopes();
-    if (noLibrary || !envelopes.length) {
-      setStatus('Library is empty — run Download all first.', 'warn');
-      return;
-    }
-    targets = envelopes.map((env) => ({ id: env.id, title: env.title, updated: env.updated }));
+  if (!targets.length) {
+    setStatus('Library is empty — run Download first.', 'warn');
+    return;
   }
 
   bulkRunning = true;
   bulkAbort = false;
-  const prevLabel = exportAllBtn.textContent;
-  exportAllBtn.textContent = 'Stop';
+  const prevLabel = exportBtn.textContent;
+  exportBtn.textContent = 'Stop';
   downloadBtn.disabled = true;
-  exportSelBtn.disabled = true;
   moreBtn.hidden = true;
-  rebuildBtn.disabled = true;
   digestBtn.disabled = true;
   loadAllBtn.disabled = true;
 
   try {
-    // Diff-before-export: what's the vault already holding (id -> updated)?
-    const { envelopes: vaultEnvs } = await readVaultEnvelopes();
-    const vaultUpdated = new Map(vaultEnvs.map((e) => [e.id, e.updated || e.created || '']));
-    // And the live list — for the staleness check the user asked for:
-    // "before we push it out, compare and see if the JSON we have is up to date".
+    // Staleness check against the live ChatGPT list, when we have one.
     const listById = new Map(conversations.map((c) => [c.id, c]));
 
     let exported = 0;
     let refreshed = 0;
-    let unchanged = 0;
     let failed = 0;
     let consecutiveFails = 0;
     const failures = [];
 
     for (let i = 0; i < targets.length; i++) {
       if (bulkAbort) break;
-      const t = targets[i];
-      let env = (await readLibraryEnvelopesOne(t.id));
+      const env = targets[i];
 
-      // Staleness check: the live list is newer than our library JSON?
-      const live = listById.get(t.id);
-      if (env && live && live.updated && env.updated && live.updated > env.updated) {
-        setStatus(`Refreshing ${i + 1}/${targets.length}: ${t.title}`, 'warn');
+      // Before writing: compare against the current ChatGPT version.
+      const live = listById.get(env.id);
+      if (live && live.updated && env.updated && live.updated > env.updated) {
+        setStatus(`Refreshing ${i + 1}/${targets.length}: ${env.title}`, 'warn');
         try {
-          const raw = await getConversation(t.id);
-          env = buildEnvelope(normalizeConversation(raw));
-          await writeLibraryThread(env);
-          diffIndexPut(t.id, env.updated || env.created || '');
+          const raw = await getConversation(env.id);
+          const fresh = buildEnvelope(normalizeConversation(raw));
+          await writeLibraryThread(fresh);
+          Object.assign(env, fresh); // export the refreshed copy
           refreshed++;
         } catch (e) {
-          // Can't refresh (rate limit etc.) — export what we have rather than
-          // blocking the whole batch; the next run will try again.
-          console.warn(`[convo-hist ${BUILD}] refresh skipped: "${t.title}" — ${e.message}`);
+          console.warn(`[convo-hist ${BUILD}] refresh skipped: "${env.title}" — ${e.message}`);
+          // Export what we have; the next run will refresh again.
         }
-      }
-      if (!env) continue; // not in the library and refresh failed — skip quietly
-
-      if (vaultUpdated.get(t.id) && env.updated && env.updated <= vaultUpdated.get(t.id)) {
-        exportedIds.add(t.id);
-        checkedIds.delete(t.id);
-        unchanged++;
-        continue;
       }
 
       setStatus(`Exporting ${i + 1}/${targets.length}: ${env.title}`, 'warn');
       try {
         const md = renderMarkdown(env);
-        await writeArchiveFile(env, md, { includeJson: false });
+        await writeArchiveFile(env, md);
         if (plain) await writePlainFile(env, md, plainFormat);
-        exportedIds.add(t.id);
-        checkedIds.delete(t.id);
+        exportedIds.add(env.id);
+        checkedIds.delete(env.id);
         exported++;
         consecutiveFails = 0;
       } catch (e) {
@@ -502,31 +440,19 @@ async function exportTargets(targets) {
         failed++;
         consecutiveFails++;
         if (consecutiveFails >= 3) {
-          setStatus(`Export paused: 3 in a row failed (last: ${msg}). Run Export all again to resume.`, 'err');
+          setStatus(`Export paused: 3 in a row failed (last: ${msg}). Run Export again to resume.`, 'err');
           return;
         }
       }
       await sleep(120);
     }
 
-    let indexNote = '';
-    try {
-      const { envelopes } = await readLibraryEnvelopes();
-      await writeDerivedViews(buildAllIndexes(envelopes));
-      searchState = buildSearchIndex(envelopes);
-      archivedCount = envelopes.length;
-      indexNote = ` · indexes + search updated (${envelopes.length})`;
-    } catch {
-      indexNote = ' · indexes not updated';
-    }
-
-    const stopped = bulkAbort ? ' (stopped early — run Export all again to resume)' : '';
+    const stopped = bulkAbort ? ' (stopped early — run Export again to resume)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
     setStatus(
-      `Export done: ${exported} written, ${unchanged} unchanged, ${refreshed} refreshed, ${failed} failed` +
-        `${indexNote}${stopped}${reasonNote}.`,
+      `Export done: ${exported} written, ${refreshed} refreshed, ${failed} failed${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
@@ -534,68 +460,27 @@ async function exportTargets(targets) {
   } finally {
     bulkRunning = false;
     bulkAbort = false;
-    exportAllBtn.textContent = prevLabel;
-    rebuildBtn.disabled = false;
+    exportBtn.textContent = prevLabel;
     updateButtons();
     renderList();
   }
 }
 
-// Vault readers (what's already exported).
-async function readVaultEnvelopes() {
-  try {
-    return await readArchiveEnvelopes();
-  } catch {
-    return { envelopes: [] };
-  }
-}
-
-// Single library envelope by id (scan once, cache for the batch).
-let libCache = null;
-async function readLibraryEnvelopesOne(id) {
-  if (!libCache) {
-    const { envelopes } = await readLibraryEnvelopes();
-    libCache = new Map(envelopes.map((e) => [e.id, e]));
-  }
-  return libCache.get(id) || null;
-}
-function invalidateLibCache() { libCache = null; }
-
-// ---------------------------------------------------------------------------
-// Row actions — 📄J (copy JSON) / 📄M (copy markdown, rendered on the fly).
-
-async function copyThread(chatId, fmt) {
-  invalidateLibCache();
-  const env = await readLibraryEnvelopesOne(chatId);
-  if (!env) {
-    setStatus('Thread not in the library yet — run Download all.', 'warn');
-    return;
-  }
-  const text = fmt === 'json' ? JSON.stringify(env, null, 2) : renderMarkdown(env);
-  try {
-    await navigator.clipboard.writeText(text);
-    setStatus(`Copied ${fmt === 'json' ? 'JSON' : 'markdown'}: ${env.title}`, 'ok');
-  } catch {
-    setStatus('Clipboard blocked by the browser.', 'err');
-  }
-}
-
-// Single-thread export (double-click a row): refresh-if-stale, then export.
+// Single-thread export (double-click a row).
 async function capture(chatId) {
   setStatus('Preparing thread…');
-  invalidateLibCache();
-  let env = await readLibraryEnvelopesOne(chatId);
+  let env = libraryEnvs.find((x) => x.id === chatId);
   const live = conversations.find((c) => c.id === chatId);
   if (!env || (live && live.updated && env.updated && live.updated > env.updated)) {
     try {
       const raw = await getConversation(chatId);
       env = buildEnvelope(normalizeConversation(raw));
       await writeLibraryThread(env);
-      diffIndexPut(chatId, env.updated || env.created || '');
-      invalidateLibCache();
+      const i = libraryEnvs.findIndex((x) => x.id === chatId);
+      if (i >= 0) libraryEnvs[i] = env; else libraryEnvs.push(env);
     } catch (err) {
       setStatus(`Fetch failed: ${err.message}${authHint(err)}`, 'err');
-      if (!env) return; // nothing to export
+      if (!env) return;
     }
   }
 
@@ -610,26 +495,15 @@ async function capture(chatId) {
 
   try {
     const md = renderMarkdown(env);
-    await writeArchiveFile(env, md, { includeJson: false });
+    await writeArchiveFile(env, md);
     if (plain) await writePlainFile(env, md, plainFormat);
     exportedIds.add(chatId);
     renderList();
-
-    let indexNote = '';
-    try {
-      const { envelopes } = await readLibraryEnvelopes();
-      await writeDerivedViews(buildAllIndexes(envelopes));
-      searchState = buildSearchIndex(envelopes);
-      archivedCount = envelopes.length;
-      indexNote = ` · indexes + search updated (${envelopes.length})`;
-    } catch {
-      indexNote = ' · indexes not updated';
-    }
     try {
       await navigator.clipboard.writeText(md);
-      setStatus(`Exported ${env.title}${indexNote} · copied to clipboard`, 'ok');
+      setStatus(`Exported ${env.title} · copied to clipboard`, 'ok');
     } catch {
-      setStatus(`Exported ${env.title}${indexNote} (clipboard blocked)`, 'ok');
+      setStatus(`Exported ${env.title} (clipboard blocked)`, 'ok');
     }
   } catch (e) {
     setStatus(`Export failed: ${e.message}`, 'err');
@@ -637,8 +511,25 @@ async function capture(chatId) {
 }
 
 // ---------------------------------------------------------------------------
-// M4 digest — summarizes/tags LIBRARY threads in place (JSON is the truth;
-// the vault markdown refreshes on the next export).
+// Row actions — 📄J copies the library JSON, 📄M renders markdown on the fly.
+
+async function copyThread(chatId, fmt) {
+  const env = libraryEnvs.find((x) => x.id === chatId);
+  if (!env) {
+    setStatus('Thread not in the library.', 'warn');
+    return;
+  }
+  const text = fmt === 'json' ? JSON.stringify(env, null, 2) : renderMarkdown(env);
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`Copied ${fmt === 'json' ? 'JSON' : 'markdown'}: ${env.title}`, 'ok');
+  } catch {
+    setStatus('Clipboard blocked by the browser.', 'err');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DIGEST: summary + tags on library threads, written back in place.
 
 async function digestMissing() {
   if (bulkRunning) {
@@ -652,20 +543,17 @@ async function digestMissing() {
     setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
     return;
   }
-  const { envelopes } = await readLibraryEnvelopes();
-  const targets = envelopes.filter((env) => !env.summary || !(env.tags || []).length);
+  const targets = libraryEnvs.filter((env) => !env.summary || !(env.tags || []).length);
   if (!targets.length) {
-    setStatus(`Nothing to digest — all ${envelopes.length} threads already have summaries.`, 'ok');
+    setStatus(`Nothing to digest — all ${libraryEnvs.length} threads already have summaries.`, 'ok');
     return;
   }
 
   bulkRunning = true;
   bulkAbort = false;
-  exportAllBtn.textContent = 'Stop';
+  exportBtn.textContent = 'Stop';
   downloadBtn.disabled = true;
-  exportSelBtn.disabled = true;
   moreBtn.hidden = true;
-  rebuildBtn.disabled = true;
   digestBtn.disabled = true;
   loadAllBtn.disabled = true;
 
@@ -686,7 +574,6 @@ async function digestMissing() {
         env.tags = d.tags;
         backendLabel = d.backend;
         await writeLibraryThread(env);
-        invalidateLibCache();
         done++;
         consecutiveFails = 0;
       } catch (e) {
@@ -703,20 +590,13 @@ async function digestMissing() {
       await sleep(300);
     }
 
-    try {
-      const { envelopes: fresh } = await readLibraryEnvelopes();
-      await writeDerivedViews(buildAllIndexes(fresh));
-      searchState = buildSearchIndex(fresh);
-      archivedCount = fresh.length;
-    } catch { /* indexes refresh on next rebuild */ }
-
     const stopped = bulkAbort ? ' (stopped early)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — console)` : ''}`
       : '';
     setStatus(
       `Digest done: ${done} summarized via ${backendLabel || 'fallback'}, ${failed} failed${reasonNote}${stopped}. ` +
-        'Run Export all to refresh the vault markdown.',
+        'Run Export to refresh the vault markdown.',
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
@@ -724,65 +604,23 @@ async function digestMissing() {
   } finally {
     bulkRunning = false;
     bulkAbort = false;
-    exportAllBtn.textContent = 'Export all';
-    rebuildBtn.disabled = false;
+    exportBtn.textContent = 'Export';
     updateButtons();
     renderList();
   }
 }
 
-// Rebuild derived views from the library (the source of truth).
-async function rebuildFromLibrary() {
-  setStatus('Reading library…');
-  try {
-    const { envelopes, skipped, noLibrary } = await readLibraryEnvelopes();
-    if (noLibrary) {
-      setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
-      return;
-    }
-    if (!envelopes.length) {
-      setStatus('Library is empty — run Download all first.', 'warn');
-      return;
-    }
-    const { files } = await writeDerivedViews(buildAllIndexes(envelopes));
-    searchState = buildSearchIndex(envelopes);
-    archivedCount = envelopes.length;
-    setStatus(
-      `Rebuilt: ${files} index files from ${envelopes.length} threads` +
-        (skipped ? ` (${skipped} unreadable skipped)` : ''),
-      'ok'
-    );
-  } catch (e) {
-    setStatus(`Rebuild failed: ${e.message}`, 'err');
-  }
-}
-
-async function refreshSearchIndex() {
-  try {
-    const { envelopes } = await readLibraryEnvelopes();
-    searchState = buildSearchIndex(envelopes);
-    archivedCount = envelopes.length;
-  } catch (e) {
-    console.error('search index build failed:', e);
-    searchState = null;
-    archivedCount = 0;
-  }
-}
-
 function updateButtons() {
   const n = checkedIds.size;
-  exportSelBtn.textContent = n > 0 ? `Export selected (${n})` : 'Export selected';
-  exportSelBtn.disabled = bulkRunning || n === 0;
   selCountEl.textContent = `${n} selected`;
   loadAllBtn.hidden = !hasMore || bulkRunning;
   digestBtn.disabled = bulkRunning;
 }
 
-function updateSelAllState(shown) {
-  const list = shown || conversations;
-  const n = list.filter((c) => checkedIds.has(c.id)).length;
-  selAllEl.checked = list.length > 0 && n === list.length;
-  selAllEl.indeterminate = n > 0 && n < list.length;
+function updateSelAllState() {
+  const n = libraryEnvs.filter((env) => checkedIds.has(env.id)).length;
+  selAllEl.checked = libraryEnvs.length > 0 && n === libraryEnvs.length;
+  selAllEl.indeterminate = n > 0 && n < libraryEnvs.length;
 }
 
 function renderList() {
@@ -790,79 +628,79 @@ function renderList() {
   listEl.innerHTML = '';
 
   const shown = q
-    ? conversations.filter((c) => c.title.toLowerCase().includes(q))
-    : conversations;
+    ? libraryEnvs.filter((env) => env.title.toLowerCase().includes(q))
+    : libraryEnvs;
 
-  updateSelAllState(shown);
+  updateSelAllState();
   updateButtons();
 
   if (!shown.length) {
     listEl.innerHTML = `<div class="notice">${
-      q ? 'No matches.' : 'No conversations found.'
+      q ? 'No matches in the library.' : 'Library is empty — run Download.'
     }</div>`;
     return;
   }
 
-  for (const c of shown) {
+  for (const env of shown) {
     const div = document.createElement('div');
-    div.className = 'chat-item' + (exportedIds.has(c.id) ? ' captured' : '');
+    div.className = 'chat-item' + (exportedIds.has(env.id) ? ' captured' : '');
     div.role = 'option';
 
     const cb = document.createElement('input');
     cb.type = 'checkbox';
-    cb.checked = checkedIds.has(c.id);
+    cb.checked = checkedIds.has(env.id);
     cb.title = 'Select for export';
     cb.addEventListener('click', (e) => e.stopPropagation());
     cb.addEventListener('change', () => {
-      if (cb.checked) checkedIds.add(c.id);
-      else checkedIds.delete(c.id);
+      if (cb.checked) checkedIds.add(env.id);
+      else checkedIds.delete(env.id);
       updateButtons();
-      updateSelAllState(shown);
+      updateSelAllState();
     });
 
     const body = document.createElement('div');
     body.className = 'body';
     const t = document.createElement('span');
     t.className = 't';
-    t.textContent = c.title;
-    t.title = c.title;
+    t.textContent = env.title;
+    t.title = env.title;
     const m = document.createElement('span');
     m.className = 'm';
-    m.textContent = c.updated ? `updated ${c.updated.slice(0, 10)}` : '';
+    m.textContent = env.updated ? `updated ${env.updated.slice(0, 10)}` : '';
     body.append(t, m);
 
     const btnJson = document.createElement('button');
     btnJson.className = 'rowbtn';
     btnJson.textContent = '📄J';
     btnJson.title = 'Copy this thread\'s JSON to the clipboard';
-    btnJson.setAttribute('data-copy', c.id);
+    btnJson.setAttribute('data-copy', env.id);
     btnJson.dataset.fmt = 'json';
 
     const btnMd = document.createElement('button');
     btnMd.className = 'rowbtn';
     btnMd.textContent = '📄M';
     btnMd.title = 'Copy this thread\'s markdown to the clipboard';
-    btnMd.setAttribute('data-copy', c.id);
+    btnMd.setAttribute('data-copy', env.id);
     btnMd.dataset.fmt = 'md';
 
     div.append(cb, body, btnJson, btnMd);
     div.addEventListener('click', (e) => {
-      if (e.target.closest('.rowbtn')) return; // buttons handle themselves
+      if (e.target.closest('.rowbtn')) return;
       cb.checked = !cb.checked;
       cb.dispatchEvent(new Event('change'));
     });
-    div.addEventListener('dblclick', () => capture(c.id));
+    div.addEventListener('dblclick', () => capture(env.id));
     listEl.appendChild(div);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Results mode — tags-first cards over the library threads.
+// Results mode — search over the library threads.
 
 function renderResults(q) {
   if (!searchState) {
     listEl.innerHTML =
-      '<div class="notice">Nothing indexed yet.<br>Run Download all, then Rebuild.</div>';
+      '<div class="notice">Nothing indexed yet.<br>Run Download first.</div>';
     return;
   }
 
