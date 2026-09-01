@@ -10,8 +10,163 @@
 import { idbGet, idbSet, idbDel } from './idb.js';
 import { baseName } from './naming.js';
 
-const HANDLE_KEY = 'archiveHandle';
+const HANDLE_KEY = 'archiveHandle';     // the vault/Obsidian folder
+const LIBRARY_KEY = 'libraryHandle';    // the downloaded-JSON folder
+const PLAIN_KEY = 'plainHandle';        // optional plain output folder
 let cachedHandle = null;
+let cachedLibrary = null;
+let cachedPlain = null;
+
+// ---------------------------------------------------------------------------
+// Library folder — where downloaded thread JSONs live (one thread = one file).
+
+export async function getLibraryHandle({ interactive = false } = {}) {
+  if (cachedLibrary) return cachedLibrary;
+  const stored = await idbGet(LIBRARY_KEY);
+  if (stored) {
+    const perm = await stored.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      cachedLibrary = stored;
+      return cachedLibrary;
+    }
+    if (!interactive) return null;
+    const p = await stored.requestPermission({ mode: 'readwrite' });
+    if (p === 'granted') {
+      cachedLibrary = stored;
+      return cachedLibrary;
+    }
+    return null;
+  }
+  if (!interactive) return null;
+  cachedLibrary = await showDirectoryPicker({ mode: 'readwrite', id: 'convo-library' });
+  await idbSet(LIBRARY_KEY, cachedLibrary);
+  return cachedLibrary;
+}
+
+export async function forgetLibraryHandle() {
+  cachedLibrary = null;
+  await idbDel(LIBRARY_KEY);
+}
+
+export async function libraryStatus() {
+  const stored = await idbGet(LIBRARY_KEY);
+  if (!stored) return { state: 'none' };
+  const perm = await stored.queryPermission({ mode: 'readwrite' });
+  if (perm === 'granted') {
+    cachedLibrary = stored;
+    return { state: 'granted', name: stored.name };
+  }
+  return { state: 'needs-permission', name: stored.name };
+}
+
+// One thread = one file: <library>/threads/<Title> (<id8>).json
+export async function writeLibraryThread(env) {
+  const root = await getLibraryHandle({ interactive: false });
+  if (!root) throw Object.assign(new Error('No library folder granted'), { code: 'NO_LIBRARY' });
+  const dir = await root.getDirectoryHandle('threads', { create: true });
+  const base = baseName(env);
+  const fh = await dir.getFileHandle(`${base}.json`, { create: true });
+  const w = await fh.createWritable();
+  await w.write(JSON.stringify(env, null, 2));
+  await w.close();
+
+  // Title changed? Remove the old-named file for the same thread id.
+  let doomed = [];
+  try {
+    for await (const entry of dir.values()) {
+      if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue;
+      const nameBase = entry.name.slice(0, -5);
+      if (nameBase === base) continue;
+      try {
+        const parsed = JSON.parse(await (await entry.getFile()).text());
+        if (parsed && parsed.id === env.id) doomed.push(nameBase);
+      } catch { /* unreadable — leave it */ }
+    }
+    for (const old of doomed) {
+      try { await dir.removeEntry(`${old}.json`); } catch { /* gone */ }
+    }
+  } catch { /* best-effort cleanup */ }
+
+  return `threads/${base}.json`;
+}
+
+// Scan the library: every downloaded thread, parsed.
+export async function readLibraryEnvelopes() {
+  const root = await getLibraryHandle({ interactive: false });
+  if (!root) return { envelopes: [], skipped: 0, noLibrary: true };
+  let dir;
+  try {
+    dir = await root.getDirectoryHandle('threads');
+  } catch {
+    return { envelopes: [], skipped: 0, noLibrary: false };
+  }
+  const envelopes = [];
+  let skipped = 0;
+  for await (const entry of dir.values()) {
+    if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue;
+    try {
+      const env = JSON.parse(await (await entry.getFile()).text());
+      if (env && env.id) envelopes.push(env);
+      else skipped++;
+    } catch {
+      skipped++;
+    }
+  }
+  return { envelopes, skipped, noLibrary: false };
+}
+
+// ---------------------------------------------------------------------------
+// Optional plain-output folder — exports as markdown or JSON per setting.
+
+export async function getPlainHandle({ interactive = false } = {}) {
+  if (cachedPlain) return cachedPlain;
+  const stored = await idbGet(PLAIN_KEY);
+  if (stored) {
+    const perm = await stored.queryPermission({ mode: 'readwrite' });
+    if (perm === 'granted') {
+      cachedPlain = stored;
+      return cachedPlain;
+    }
+    if (!interactive) return null;
+    const p = await stored.requestPermission({ mode: 'readwrite' });
+    if (p === 'granted') {
+      cachedPlain = stored;
+      return cachedPlain;
+    }
+    return null;
+  }
+  if (!interactive) return null;
+  cachedPlain = await showDirectoryPicker({ mode: 'readwrite', id: 'convo-plain' });
+  await idbSet(PLAIN_KEY, cachedPlain);
+  return cachedPlain;
+}
+
+export async function forgetPlainHandle() {
+  cachedPlain = null;
+  await idbDel(PLAIN_KEY);
+}
+
+export async function plainStatus() {
+  const stored = await idbGet(PLAIN_KEY);
+  if (!stored) return { state: 'none' };
+  const perm = await stored.queryPermission({ mode: 'readwrite' });
+  if (perm === 'granted') {
+    cachedPlain = stored;
+    return { state: 'granted', name: stored.name };
+  }
+  return { state: 'needs-permission', name: stored.name };
+}
+
+export async function writePlainFile(env, md, format /* 'md' | 'json' */) {
+  const root = await getPlainHandle({ interactive: false });
+  if (!root) return null;
+  const base = baseName(env);
+  const fh = await root.getFileHandle(`${base}.${format}`, { create: true });
+  const w = await fh.createWritable();
+  await w.write(format === 'json' ? JSON.stringify(env, null, 2) : md);
+  await w.close();
+  return `${base}.${format}`;
+}
 
 export async function getArchiveHandle({ interactive = false } = {}) {
   if (cachedHandle) return cachedHandle;
@@ -61,24 +216,29 @@ async function writeText(root, segments, filename, text) {
   await writable.close();
 }
 
-// Writes the canonical envelope + derived markdown. Overwrites in place —
-// update-in-place on re-capture is a feature, not a bug. Filenames are the
+// Writes the archive pair for one conversation. The vault is markdown-first:
+// the .md always lands; the .json copy only when `includeJson` is set (the
+// "keep JSON backups" toggle — raw data's home is the browser store, and it
+// stays recoverable from ChatGPT by re-download). Overwrites in place —
+// update-in-place on re-export is a feature, not a bug. Filenames are the
 // sanitized conversation title + short id (see naming.js); any older files
-// for the same chat_id under a different name (e.g. previous title, or the
-// original uuid-named files) are removed so the vault never shows dupes.
-export async function writeArchiveFile(env, md) {
+// for the same chat_id under a different name are removed so the vault never
+// shows dupes.
+export async function writeArchiveFile(env, md, { includeJson = false } = {}) {
   const root = await getArchiveHandle({ interactive: false });
   if (!root) throw Object.assign(new Error('No archive folder granted'), {
     code: 'NO_FOLDER'
   });
 
   const base = baseName(env);
-  await writeText(root, ['chats'], `${base}.json`, JSON.stringify(env, null, 2));
+  if (includeJson) {
+    await writeText(root, ['chats'], `${base}.json`, JSON.stringify(env, null, 2));
+  }
   await writeText(root, ['chats'], `${base}.md`, md);
   await removeOrphans(root, env, base);
 
   return {
-    jsonPath: `chats/${base}.json`,
+    jsonPath: includeJson ? `chats/${base}.json` : null,
     mdPath: `chats/${base}.md`
   };
 }

@@ -139,6 +139,28 @@ input[type="checkbox"] { accent-color: var(--accent); }
   word-break: break-all;
 }
 
+.jsonopt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.rowbtn {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--dim);
+  border-radius: 6px;
+  font-size: 10px;
+  padding: 2px 5px;
+  cursor: pointer;
+  flex: none;
+}
+.rowbtn:hover { color: var(--text); border-color: var(--accent); }
+
 .actions {
   display: flex;
   gap: 8px;

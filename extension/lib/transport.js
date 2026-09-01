@@ -9,7 +9,7 @@
 //
 // BUILD stamp is logged at import so stale-code confusion dies forever.
 
-export const BUILD = 'v0.1.9-cache';
+export const BUILD = 'v0.4.0-library';
 
 const ORIGIN = 'https://chatgpt.com';
 const TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -90,7 +90,7 @@ async function coreFetch(path) {
   stage(`GET ${path} …`);
   const res = await fetchWithTimeout(`${ORIGIN}${path}`, { credentials: 'include', headers });
   if (!res.ok) {
-    throw fail(
+    const err = fail(
       'api',
       `HTTP ${res.status} ${res.statusText}` +
         (res.status === 401 || res.status === 403
@@ -98,6 +98,13 @@ async function coreFetch(path) {
           : ''),
       res.status
     );
+    // Rate limiter speaking? Honor its retry-after so pacing waits exactly
+    // as long as the server asked — no more, no less.
+    if (res.status === 429) {
+      const ra = parseFloat(res.headers.get('retry-after') || '');
+      if (Number.isFinite(ra) && ra > 0) err.retryAfterMs = Math.min(ra * 1000, 30000);
+    }
+    throw err;
   }
   return res.json();
 }

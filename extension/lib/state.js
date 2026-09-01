@@ -56,3 +56,35 @@ export async function setDiffEntry(id, updated) {
   st.diff[id] = updated;
   await persist(st);
 }
+
+// "Keep JSON backups in the vault" toggle (default OFF: the vault is
+// markdown-first; the library folder holds the raw JSON).
+export async function getIncludeJson() {
+  const st = await loadState();
+  return !!st.includeJson;
+}
+
+export async function setIncludeJson(v) {
+  const st = await loadState();
+  st.includeJson = !!v;
+  await persist(st);
+}
+
+// ---------------------------------------------------------------------------
+// Settings (written by the settings window, read everywhere).
+
+export async function getSettings() {
+  const st = await loadState();
+  return {
+    summarizer: st.summarizer || 'auto',        // auto|gemini|ollama|lmstudio|extractive
+    ollamaUrl: st.ollamaUrl || 'http://localhost:11434',
+    ollamaModel: st.ollamaModel || '',
+    plainFormat: st.plainFormat || 'md',        // md|json
+  };
+}
+
+export async function saveSettings(patch) {
+  const st = await loadState();
+  Object.assign(st, patch || {});
+  await persist(st);
+}

@@ -441,6 +441,56 @@ func TestP1_11_OrphanCleanupOnTitleChange(t *testing.T) {
 	s.evidence("P1-11-orphan-after.png")
 }
 
+// M4: the digest engine. e2e mode forces the extractive fallback, so results
+// are deterministic: every captured conversation gets a summary + tags, tag
+// chips appear in search, and indexes/tags/ MOCs are written.
+func TestP1_12_Digest(t *testing.T) {
+	s := startTest(t, "P1-12", "Digest fills summaries + tags; chips and tag MOCs light up", "P1")
+	s.waitStamp()
+	s.state.Total = 3
+	s.page.MustElement("#reload-btn").MustClick()
+	s.waitItems(3, 8*time.Second)
+	s.grantFolder()
+
+	s.dblclickRow(0)
+	s.dblclickRow(1)
+	s.dblclickRow(2)
+	s.waitBadges(3, 15*time.Second)
+	s.waitStatus("indexes + search updated (3)", "ok", 10*time.Second)
+
+	s.page.MustElement("#digest-btn").MustClick()
+	s.waitStatus("Digest done: 3 summarized", "ok", 30*time.Second)
+
+	// Envelopes on disk now carry summary + tags
+	raw := s.page.MustEval(`() => window.__e2eFsFileText('chats/Sourdough Starter Guide (convb).json')`).Str()
+	var env struct {
+		Summary string   `json:"summary"`
+		Tags    []string `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		s.failf("digest envelope not valid JSON: %v", err)
+		return
+	}
+	if env.Summary == "" {
+		s.failf("digest left summary empty in envelope")
+	}
+	if len(env.Tags) == 0 {
+		s.failf("digest left tags empty in envelope")
+	}
+	s.logf("conv-b digest: summary=%q tags=%v", env.Summary, env.Tags)
+
+	// Search chips show real tags now, and the tag MOC exists
+	s.typeQuery("hydration")
+	s.waitResults(1, 8*time.Second)
+	if strings.Contains(s.text(".result-card .chips"), "untagged") {
+		s.failf("result card should show real tags after digest, got %q", s.text(".result-card .chips"))
+	}
+	if !s.fsHas("indexes/tags/sourdough.md") && s.fsCountIn("indexes/tags/", ".md") == 0 {
+		s.failf("no tag MOC written under indexes/tags/ (files: %v)", s.fsFiles())
+	}
+	s.evidence("P1-12-digest.png")
+}
+
 // ---------------------------------------------------------------------------
 // P2 — edge cases and robustness
 

@@ -25,7 +25,7 @@ var _ = http.StatusText // net/http reserved for future response helpers
 var polyfillJS string
 
 const (
-	buildStamp = "v0.1.9-cache"
+	buildStamp = "v0.4.0-library"
 	panelPath  = "sidepanel/sidepanel.html"
 )
 

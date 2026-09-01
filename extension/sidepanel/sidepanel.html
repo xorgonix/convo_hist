@@ -9,8 +9,9 @@
 <body>
   <header class="topbar">
     <div class="brand">Convo&nbsp;Hist <span id="build-label" class="build">build: loading…</span></div>
-    <button id="folder-btn" class="ghost" title="Choose the archive folder on disk">
-      <span id="folder-label">Choose folder…</span>
+    <button id="settings-btn" class="ghost" title="Settings: folders, summarizer, output options">⚙</button>
+    <button id="folder-btn" class="ghost" title="Choose the vault folder (markdown exports)">
+      <span id="folder-label">Vault folder…</span>
     </button>
   </header>
 
@@ -25,6 +26,7 @@
   <section class="list-tools">
     <label class="selall"><input type="checkbox" id="sel-all" /> Select all</label>
     <span id="sel-count" class="hint">0 selected</span>
+    <span id="library-hint" class="hint"></span>
     <span class="spacer"></span>
     <button id="load-all-btn" class="ghost" hidden title="Fetch every page of the conversation list">Load all</button>
   </section>
@@ -32,9 +34,12 @@
   <main id="chat-list" class="list" role="listbox" aria-label="Conversations"></main>
 
   <section class="actions">
-    <button id="capture-btn" class="primary" disabled>Capture selected</button>
-    <button id="capture-all-btn" class="ghost" title="Crawl every page: capture new + changed conversations">Capture all</button>
-    <button id="rebuild-btn" class="ghost" title="Regenerate indexes/ from the files on disk">Rebuild from disk</button>
+    <button id="capture-btn" class="primary" title="Crawl every page and download new/changed threads into the browser store">Download all</button>
+    <button id="export-selected-btn" class="ghost" disabled title="Write the checked threads' markdown to the vault folder">Export selected</button>
+    <button id="capture-all-btn" class="ghost" title="Export every downloaded thread's markdown to the vault folder">Export all</button>
+    <button id="digest-btn" class="ghost" title="Summarize + tag downloaded threads that lack it">Digest</button>
+    <label class="jsonopt"><input type="checkbox" id="json-toggle" /> JSON backups</label>
+    <button id="rebuild-btn" class="ghost" title="Regenerate indexes + search from the browser store (imports vault JSON if present)">Rebuild</button>
     <button id="more-btn" class="ghost" hidden>Load more</button>
   </section>
 

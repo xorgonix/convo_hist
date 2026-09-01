@@ -1,6 +1,17 @@
-// sidepanel.js — search-first UI. M1 scope: list, filter, capture to disk.
-// Transport is DIRECT to chatgpt.com via lib/transport.js (host permissions +
-// login cookies). No active-tab coupling, no content script needed.
+// sidepanel.js — v0.4.0-library: the user-approved two-folder flow.
+//
+//   STAGE 1 DOWNLOAD: ChatGPT -> LIBRARY FOLDER (visible directory you set in
+//   Settings). One thread = one JSON file: <library>/threads/<Title> (<id>).json
+//   Auto-runs on panel open. Paced, honors retry-after, self-throttling,
+//   resumable.
+//
+//   STAGE 2 EXPORT: library JSON -> vault folder (markdown with frontmatter)
+//   and optional extra output folder (markdown or JSON per setting).
+//   Before each export the library JSON is compared against ChatGPT's list —
+//   stale ones are refreshed first.
+//
+//   Row icons: 📄J copies the thread's JSON to the clipboard, 📄M copies
+//   freshly-rendered markdown. ⚙ opens the Settings window.
 
 import {
   normalizeConversationSummary,
@@ -8,236 +19,85 @@ import {
 } from '../lib/vendors/chatgpt.js';
 import { buildEnvelope } from '../lib/envelope.js';
 import { renderMarkdown } from '../lib/markdown.js';
-import { getArchiveHandle, writeArchiveFile, archiveStatus, readArchiveEnvelopes, writeDerivedViews } from '../lib/fsaccess.js';
+import {
+  getArchiveHandle, writeArchiveFile, archiveStatus,
+  getLibraryHandle, libraryStatus,
+  getPlainHandle, writePlainFile, plainStatus,
+  writeDerivedViews,
+} from '../lib/fsaccess.js';
 import { buildAllIndexes } from '../lib/indexes.js';
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
 import { loadState, saveList, saveDiffMap, setDiffEntry } from '../lib/state.js';
+import { digestTurns } from '../lib/summarize.js';
 
 const BATCH = 50;
-
 const $ = (id) => document.getElementById(id);
 
-// Stamp the build into the header as soon as this module executes.
-// If you see "build: loading…" stuck there, this JS never ran (stale panel
-// or the module failed to load) — close and reopen the panel.
 $('build-label').textContent = BUILD;
 
 const listEl = $('chat-list');
 const searchEl = $('search');
-const captureBtn = $('capture-btn');
+const downloadBtn = $('capture-btn'); // primary: Download all
+const exportSelBtn = $('export-selected-btn');
+const exportAllBtn = $('capture-all-btn'); // Export all + doubles as Stop
 const moreBtn = $('more-btn');
 const statusEl = $('status');
 const folderBtn = $('folder-btn');
 const folderLabel = $('folder-label');
+const settingsBtn = $('settings-btn');
+const libraryHint = $('library-hint');
 const reloadBtn = $('reload-btn');
 const rebuildBtn = $('rebuild-btn');
-const captureAllBtn = $('capture-all-btn');
+const digestBtn = $('digest-btn');
 const selAllEl = $('sel-all');
 const selCountEl = $('sel-count');
 const loadAllBtn = $('load-all-btn');
 
-let conversations = []; // normalized summaries
-let capturedIds = new Set(); // already on disk (badge)
-let checkedIds = new Set(); // selected for batch capture
-let diffIndex = {}; // id -> updated ISO — the browser-side refresh index
+let conversations = []; // normalized summaries from the live list
+let exportedIds = new Set(); // in the vault (badge)
+let checkedIds = new Set(); // selected for export
 let nextOffset = 0;
 let hasMore = false;
-let loadingList = false; // in-flight guard: one list request at a time
-let searchState = null; // search index over archived envelopes
+let loadingList = false;
+let searchState = null; // search index over library threads
 let archivedCount = 0;
-let bulkRunning = false; // bulk-capture state
+let bulkRunning = false;
 let bulkAbort = false;
-// ---------------------------------------------------------------------------
-// Bulk capture — "process the whole kit at once". Crawls every page of the
-// conversation list, diffs update_time against the disk archive, and fetches
-// only new/changed conversations (sequential + paced — unofficial API).
-// Click again mid-run to stop after the current fetch.
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function fetchAllSummaries() {
-  const all = new Map(); // id -> normalized summary
-  let offset = 0;
-  for (;;) {
-    const data = await listConversations(offset, BATCH);
-    const items = (data && data.items) || [];
-    for (const item of items) {
-      const c = normalizeConversationSummary(item);
-      if (!all.has(c.id)) all.set(c.id, c);
-    }
-    if (items.length < BATCH || bulkAbort) break;
-    offset += BATCH;
-    if (offset > 100 * BATCH) break; // hard safety: 100 pages
-    await sleep(300);
-  }
-  return [...all.values()];
-}
-
-async function captureAll() {
-  // Click while running = request stop.
-  if (bulkRunning) {
-    bulkAbort = true;
-    setStatus('Stopping after the current fetch…', 'warn');
-    return;
-  }
-
-  // Grab/re-grant the folder NOW, inside the click gesture.
-  const folder = await getArchiveHandle({ interactive: true }).catch(() => null);
-  if (!folder) {
-    setStatus('No archive folder granted — click the folder button first.', 'err');
-    return;
-  }
-
-  bulkRunning = true;
-  bulkAbort = false;
-  captureAllBtn.textContent = 'Stop';
-  captureBtn.disabled = true;
-  moreBtn.hidden = true;
-  rebuildBtn.disabled = true;
-
-  try {
-    setStatus('Crawling conversation list…');
-    const summaries = await fetchAllSummaries();
-    if (!summaries.length) {
-      setStatus('No conversations found.', 'warn');
-      return;
-    }
-
-    // Refresh index: prefer the browser-side diff index; fall back to reading
-    // every envelope off disk when it's cold (first run / cache cleared).
-    let archivedUpdated;
-    if (Object.keys(diffIndex).length) {
-      archivedUpdated = new Map(Object.entries(diffIndex));
-    } else {
-      const { envelopes } = await readArchiveEnvelopes();
-      archivedUpdated = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
-      diffIndex = Object.fromEntries(archivedUpdated);
-      await saveDiffMap(diffIndex);
-    }
-
-    let captured = 0;
-    let unchanged = 0;
-    let failed = 0;
-    let consecutiveFails = 0; // circuit breaker: 3 in a row => stop hammering
-    const failures = []; // {title, message} — first few surface in the status
-    let indexNote = '';
-
-    for (let i = 0; i < summaries.length; i++) {
-      if (bulkAbort) break;
-      const c = summaries[i];
-      const last = archivedUpdated.get(c.id);
-      if (last && c.updated && c.updated <= last) {
-        capturedIds.add(c.id); // badge only — disk copy is current
-        checkedIds.delete(c.id);
-        unchanged++;
-        continue;
-      }
-
-      setStatus(`Capturing ${i + 1}/${summaries.length}: ${c.title}`, 'warn');
-      try {
-        const raw = await getConversation(c.id);
-        const env = buildEnvelope(normalizeConversation(raw));
-        await writeArchiveFile(env, renderMarkdown(env));
-        capturedIds.add(c.id);
-        checkedIds.delete(c.id);
-        captured++;
-        consecutiveFails = 0;
-        diffIndex[c.id] = env.updated || env.created || '';
-        setDiffEntry(c.id, diffIndex[c.id]);
-      } catch (e) {
-        // Auth/Cloudflare failures abort the whole batch — retries won't help.
-        if (e && (e.status === 401 || e.status === 403)) {
-          console.error(`[convo-hist ${BUILD}] batch stopped at "${c.title}" (${c.id}): ${e.message}`);
-          setStatus(`Batch stopped: ${e.message}`, 'err');
-          return;
-        }
-        const msg = e && e.message ? e.message : String(e);
-        console.warn(`[convo-hist ${BUILD}] capture failed: "${c.title}" (${c.id}) — ${msg}`);
-        if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
-        failed++;
-        consecutiveFails++;
-        if (consecutiveFails >= 3) {
-          setStatus(
-            `Capture paused: 3 conversations failed in a row (last: ${c.title} — ${msg}). ` +
-              'Check the panel console; fix the cause, then run Capture all again to resume.',
-            'err'
-          );
-          return;
-        }
-      }
-      // Rate-limited? back off well beyond normal pacing before the next item.
-      const lastErr = failures.length && failures[failures.length - 1];
-      await sleep(300 + (/429/.test(lastErr || '') ? 3000 : 0));
-    }
-
-    // One index + search rebuild for the whole batch.
-    try {
-      const { envelopes } = await readArchiveEnvelopes();
-      await writeDerivedViews(buildAllIndexes(envelopes));
-      searchState = buildSearchIndex(envelopes);
-      archivedCount = envelopes.length;
-      indexNote = ` · indexes + search updated (${envelopes.length})`;
-    } catch {
-      indexNote = ' · indexes not updated';
-    }
-
-    const stopped = bulkAbort ? ' (stopped early)' : '';
-    const reasonNote = failed
-      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
-      : '';
-    setStatus(
-      `Bulk capture done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}${reasonNote}.`,
-      failed ? 'warn' : 'ok'
-    );
-    renderList();
-  } catch (e) {
-    setStatus(`Bulk capture failed: ${e.message}`, 'err');
-  } finally {
-    bulkRunning = false;
-    bulkAbort = false;
-    captureAllBtn.textContent = 'Capture all';
-    reloadBtn.disabled = false;
-    rebuildBtn.disabled = false;
-    updateCaptureButton();
-    renderList();
-  }
-}
+const isE2e = () => {
+  try { return new URLSearchParams(location.search).has('e2e'); } catch { return false; }
+};
 
 document.addEventListener('DOMContentLoaded', init);
 
 async function init() {
-  onStage((msg) => setStatus(msg));
+  onStage((msg) => {
+    if (bulkRunning) console.log(`[convo-hist ${BUILD}] ${msg}`);
+    else setStatus(msg);
+  });
   setStatus(`Ready — build ${BUILD}`);
 
-  // Open instantly with the last-known list while the live refresh runs.
-  const st = await loadState();
-  diffIndex = st.diff || {};
-  if (st.list && st.list.length) {
-    conversations = st.list;
-    renderList();
-    setStatus(`${conversations.length} conversations (cached) — refreshing…`, 'warn');
-  }
-
-  captureBtn.addEventListener('click', captureChecked);
+  downloadBtn.addEventListener('click', downloadAll);
+  exportSelBtn.addEventListener('click', exportChecked);
+  exportAllBtn.addEventListener('click', exportAllTrigger);
+  settingsBtn.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') }));
   moreBtn.addEventListener('click', () => loadConversations(nextOffset, true));
   searchEl.addEventListener('input', () => {
     const q = searchEl.value.trim();
-    if (!q) {
-      renderList();
-      return;
-    }
+    if (!q) { renderList(); return; }
     renderResults(q);
   });
   folderBtn.addEventListener('click', chooseFolder);
   reloadBtn.addEventListener('click', async () => {
     checkedIds.clear();
-    updateCaptureButton();
+    updateButtons();
     await loadConversations(0, false);
   });
-  rebuildBtn.addEventListener('click', rebuildFromDisk);
-  captureAllBtn.addEventListener('click', captureAll);
+  rebuildBtn.addEventListener('click', rebuildFromLibrary);
+  digestBtn.addEventListener('click', digestMissing);
   selAllEl.addEventListener('change', () => {
     if (selAllEl.checked) for (const c of conversations) checkedIds.add(c.id);
     else checkedIds.clear();
@@ -245,29 +105,31 @@ async function init() {
   });
   loadAllBtn.addEventListener('click', loadAll);
 
-  // Deep-link buttons on result cards → open the thread in ChatGPT.
-  listEl.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-open]');
-    if (btn) chrome.tabs.create({ url: `https://chatgpt.com/c/${btn.getAttribute('data-open')}` });
+  listEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-copy]');
+    if (btn) {
+      e.stopPropagation();
+      await copyThread(btn.getAttribute('data-copy'), btn.getAttribute('data-copy') ? btn.dataset.fmt : '');
+      return;
+    }
+    const open = e.target.closest('[data-open]');
+    if (open) chrome.tabs.create({ url: `https://chatgpt.com/c/${open.getAttribute('data-open')}` });
   });
 
+  const st = await loadState();
+  if (st.list && st.list.length) {
+    conversations = st.list;
+    renderList();
+    setStatus(`${conversations.length} conversations (cached) — refreshing…`, 'warn');
+  }
+
   await refreshFolderStatus();
+  await refreshLibraryStatus();
   await refreshSearchIndex();
   await loadConversations(0, false);
-}
 
-// Build the search index from the canonical files on disk. Browser storage
-// plays no part — this works from a wiped cache.
-async function refreshSearchIndex() {
-  try {
-    const { envelopes } = await readArchiveEnvelopes();
-    searchState = buildSearchIndex(envelopes);
-    archivedCount = envelopes.length;
-  } catch (e) {
-    console.error('search index build failed:', e);
-    searchState = null;
-    archivedCount = 0;
-  }
+  // STAGE 1 auto-starts. e2e pages skip it for deterministic tests.
+  if (!isE2e()) downloadAll();
 }
 
 function setStatus(text, kind = '') {
@@ -285,34 +147,36 @@ function authHint(err) {
   if (err && (err.status === 401 || err.status === 403)) {
     return ' — open chatgpt.com and make sure you are logged in, then hit ↻';
   }
-  if (err && err.status === 429) return ' — rate limited, wait a moment and retry';
+  if (err && err.status === 429) return ' — rate limited, pacing automatically';
   return '';
 }
 
 async function refreshFolderStatus() {
   const st = await archiveStatus();
-  if (st.state === 'granted') {
-    folderLabel.textContent = `📁 ${st.name}`;
-  } else if (st.state === 'needs-permission') {
-    folderLabel.textContent = `📁 ${st.name} (re-grant)`;
-  } else {
-    folderLabel.textContent = 'Choose folder…';
-  }
+  folderLabel.textContent = st.state === 'granted' ? `📁 ${st.name}` :
+    (st.state === 'needs-permission' ? `📁 ${st.name} (re-grant)` : 'Vault folder…');
+}
+
+async function refreshLibraryStatus() {
+  const st = await libraryStatus();
+  libraryHint.textContent = st.state === 'granted'
+    ? `library: ${st.name}`
+    : (st.state === 'needs-permission' ? `library: ${st.name} (re-grant)` : 'library: not set — ⚙ Settings');
 }
 
 async function chooseFolder() {
   try {
     const handle = await getArchiveHandle({ interactive: true });
     await refreshFolderStatus();
-    if (handle) setStatus(`Archive folder: ${handle.name}`, 'ok');
+    if (handle) setStatus(`Vault folder: ${handle.name}`, 'ok');
   } catch (e) {
-    if (e && e.name === 'AbortError') return; // user cancelled the picker
+    if (e && e.name === 'AbortError') return;
     setStatus(`Folder error: ${e.message}`, 'err');
   }
 }
 
 async function loadConversations(offset, append) {
-  if (loadingList) return;
+  if (loadingList) return true;
   loadingList = true;
 
   try {
@@ -326,7 +190,6 @@ async function loadConversations(offset, append) {
     const normalized = items.map(normalizeConversationSummary);
 
     if (append) {
-      // De-dup by id — conversations can shift between pages during capture.
       const seen = new Set(conversations.map((c) => c.id));
       for (const c of normalized) {
         if (!seen.has(c.id)) {
@@ -344,11 +207,8 @@ async function loadConversations(offset, append) {
 
     moreBtn.hidden = !hasMore;
     renderList();
-    setStatus(
-      `${conversations.length}${total ? ` of ${total}` : ''} conversations loaded.`,
-      'ok'
-    );
-    saveList(conversations); // list cache for instant next open
+    setStatus(`Found ${total ?? conversations.length} · ${conversations.length} listed.`, 'ok');
+    saveList(conversations);
     return true;
   } catch (err) {
     listEl.innerHTML =
@@ -362,79 +222,6 @@ async function loadConversations(offset, append) {
   }
 }
 
-function renderList() {
-  const q = searchEl.value.trim().toLowerCase();
-  listEl.innerHTML = '';
-
-  const shown = q
-    ? conversations.filter((c) => c.title.toLowerCase().includes(q))
-    : conversations;
-
-  updateSelAllState(shown);
-  updateCaptureButton();
-
-  if (!shown.length) {
-    listEl.innerHTML = `<div class="notice">${
-      q ? 'No matches.' : 'No conversations found.'
-    }</div>`;
-    return;
-  }
-
-  for (const c of shown) {
-    const div = document.createElement('div');
-    div.className = 'chat-item' + (capturedIds.has(c.id) ? ' captured' : '');
-    div.role = 'option';
-
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = checkedIds.has(c.id);
-    cb.title = 'Select for batch capture';
-    cb.addEventListener('click', (e) => e.stopPropagation());
-    cb.addEventListener('change', () => {
-      if (cb.checked) checkedIds.add(c.id);
-      else checkedIds.delete(c.id);
-      updateCaptureButton();
-      updateSelAllState(shown);
-    });
-
-    const body = document.createElement('div');
-    body.className = 'body';
-    const t = document.createElement('span');
-    t.className = 't';
-    t.textContent = c.title;
-    t.title = c.title;
-    const m = document.createElement('span');
-    m.className = 'm';
-    m.textContent = c.updated ? `updated ${c.updated.slice(0, 10)}` : '';
-    body.append(t, m);
-
-    div.append(cb, body);
-    // Row click toggles the checkbox; double-click captures just this one.
-    div.addEventListener('click', () => {
-      cb.checked = !cb.checked;
-      cb.dispatchEvent(new Event('change'));
-    });
-    div.addEventListener('dblclick', () => capture(c.id));
-    listEl.appendChild(div);
-  }
-}
-
-function updateCaptureButton() {
-  const n = checkedIds.size;
-  captureBtn.textContent = n > 0 ? `Capture selected (${n})` : 'Capture selected';
-  captureBtn.disabled = bulkRunning || n === 0;
-  selCountEl.textContent = `${n} selected`;
-  loadAllBtn.hidden = !hasMore || bulkRunning;
-}
-
-function updateSelAllState(shown) {
-  const list = shown || conversations;
-  const n = list.filter((c) => checkedIds.has(c.id)).length;
-  selAllEl.checked = list.length > 0 && n === list.length;
-  selAllEl.indeterminate = n > 0 && n < list.length;
-}
-
-// Load every remaining page of the conversation list into the panel.
 async function loadAll() {
   if (loadingList || bulkRunning) return;
   loadAllBtn.disabled = true;
@@ -450,101 +237,280 @@ async function loadAll() {
   } finally {
     loadAllBtn.disabled = false;
     loadAllBtn.textContent = 'Load all';
-    updateCaptureButton();
+    updateButtons();
   }
 }
 
-// Batch-capture every checked conversation (diff-skip unchanged, paced,
-// Stop via the Capture all button — shared bulk machinery).
-async function captureChecked() {
+// ---------------------------------------------------------------------------
+// STAGE 1 — DOWNLOAD: ChatGPT -> library folder (one JSON per thread).
+
+async function fetchAllSummaries() {
+  const all = new Map();
+  let offset = 0;
+  for (;;) {
+    const data = await listConversations(offset, BATCH);
+    const items = (data && data.items) || [];
+    for (const item of items) {
+      const c = normalizeConversationSummary(item);
+      if (!all.has(c.id)) all.set(c.id, c);
+    }
+    if (items.length < BATCH || bulkAbort) break;
+    offset += BATCH;
+    if (offset > 100 * BATCH) break; // hard safety: 100 pages
+    await sleep(300);
+  }
+  return [...all.values()];
+}
+
+async function downloadAll() {
   if (bulkRunning) {
     bulkAbort = true;
     setStatus('Stopping after the current fetch…', 'warn');
     return;
   }
-  if (!checkedIds.size) return;
 
-  // Folder grant must happen inside the click gesture.
-  const folder = await getArchiveHandle({ interactive: true }).catch(() => null);
-  if (!folder) {
-    setStatus('No archive folder granted — click the folder button first.', 'err');
+  // The library grant needs a user gesture — this click is one. If it's not
+  // granted yet, the picker opens right here.
+  const lib = await getLibraryHandle({ interactive: true }).catch(() => null);
+  if (!lib) {
+    setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
     return;
   }
-
-  const targets = conversations.filter((c) => checkedIds.has(c.id));
-  if (!targets.length) return;
+  await refreshLibraryStatus();
 
   bulkRunning = true;
   bulkAbort = false;
-  const prevLabel = captureAllBtn.textContent;
-  captureAllBtn.textContent = 'Stop';
-  captureBtn.disabled = true;
+  exportAllBtn.textContent = 'Stop';
+  exportSelBtn.disabled = true;
   moreBtn.hidden = true;
   rebuildBtn.disabled = true;
+  digestBtn.disabled = true;
   loadAllBtn.disabled = true;
 
   try {
-    const { envelopes } = await readArchiveEnvelopes();
-    const archivedUpdated = new Map(
-      envelopes.map((e) => [e.id, e.updated || e.created || ''])
-    );
+    setStatus('Crawling conversation list…');
+    const summaries = await fetchAllSummaries();
+    if (!summaries.length) {
+      setStatus('No conversations found.', 'warn');
+      return;
+    }
+    setStatus(`Found ${summaries.length} · checking what's already in the library…`);
 
-    let captured = 0;
-    let unchanged = 0;
+    // Library diff: id -> updated ISO from the JSON files on disk.
+    const { envelopes } = await readLibraryEnvelopes();
+    const libUpdated = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
+    const targets = summaries.filter((c) => {
+      const have = libUpdated.get(c.id);
+      return !have || !c.updated || c.updated > have;
+    });
+
+    let downloaded = 0;
+    let unchanged = summaries.length - targets.length;
     let failed = 0;
-    let consecutiveFails = 0; // circuit breaker: 3 in a row => stop hammering
-    const failures = []; // {title, message} — first few surface in the status
-    let indexNote = '';
+    let consecutiveFails = 0;
+    let pacing = 400;
+    let recentFails = 0; // failures within the last 10 items — rate governor
+    let recentCount = 0;
+    const failures = [];
 
     for (let i = 0; i < targets.length; i++) {
       if (bulkAbort) break;
       const c = targets[i];
-      const last = archivedUpdated.get(c.id);
-      if (last && c.updated && c.updated <= last) {
-        capturedIds.add(c.id);
-        checkedIds.delete(c.id);
-        unchanged++;
-        continue;
-      }
-
-      setStatus(`Capturing ${i + 1}/${targets.length}: ${c.title}`, 'warn');
+      setStatus(`Downloading ${i + 1}/${targets.length}: ${c.title}`, 'warn');
+      downloadBtn.textContent = `⤓ ${i + 1}/${targets.length}`;
       try {
         const raw = await getConversation(c.id);
         const env = buildEnvelope(normalizeConversation(raw));
-        await writeArchiveFile(env, renderMarkdown(env));
-        capturedIds.add(c.id);
-        checkedIds.delete(c.id);
-        captured++;
+        const path = await writeLibraryThread(env);
+        diffIndexPut(c.id, env.updated || env.created || '');
+        downloaded++;
         consecutiveFails = 0;
-        diffIndex[c.id] = env.updated || env.created || '';
-        setDiffEntry(c.id, diffIndex[c.id]);
       } catch (e) {
         if (e && (e.status === 401 || e.status === 403)) {
-          console.error(`[convo-hist ${BUILD}] batch stopped at "${c.title}" (${c.id}): ${e.message}`);
-          setStatus(`Batch stopped: ${e.message}`, 'err');
+          console.error(`[convo-hist ${BUILD}] download stopped at "${c.title}" (${c.id}): ${e.message}`);
+          setStatus(`Download stopped: ${e.message} — log in on chatgpt.com, then run Download all again.`, 'err');
           return;
         }
         const msg = e && e.message ? e.message : String(e);
-        console.warn(`[convo-hist ${BUILD}] capture failed: "${c.title}" (${c.id}) — ${msg}`);
+        console.warn(`[convo-hist ${BUILD}] download failed: "${c.title}" (${c.id}) — ${msg}`);
         if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
         failed++;
         consecutiveFails++;
+        recentFails++;
+        // Rate governor: two failures in any 10-item window => slow down hard.
+        // Server-provided retry-after (429) is honored exactly.
+        if (recentFails >= 2 && pacing < 8000) {
+          pacing = Math.min(pacing * 2, 8000);
+          console.warn(`[convo-hist ${BUILD}] throttling: pacing raised to ${pacing}ms (rate limiter active)`);
+        }
+        if (e && e.retryAfterMs) await sleep(e.retryAfterMs);
         if (consecutiveFails >= 3) {
           setStatus(
-            `Capture paused: 3 conversations failed in a row (last: ${c.title} — ${msg}). ` +
-              'Check the panel console; fix the cause, then run Capture selected again to resume.',
+            `Download paused: 3 in a row failed (last: ${c.title} — ${msg}). ` +
+              `Everything downloaded is safe in the library; run Download all again to resume.`,
             'err'
           );
           return;
         }
       }
-      const lastErr = failures.length && failures[failures.length - 1];
-      await sleep(300 + (/429/.test(lastErr || '') ? 3000 : 0));
-      updateCaptureButton();
+      recentCount++;
+      if (recentCount >= 10) { recentCount = 0; recentFails = 0; }
+      if ((i + 1) % 25 === 0) {
+        console.log(`[convo-hist ${BUILD}] download progress: ${i + 1}/${targets.length}` +
+          ` (new ${downloaded}, failed ${failed}, pacing ${pacing}ms)`);
+      }
+      await sleep(pacing);
     }
 
+    const stopped = bulkAbort ? ' (stopped early — run Download all again to resume)' : '';
+    const reasonNote = failed
+      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
+      : '';
+    setStatus(
+      `Download done: ${downloaded} new, ${unchanged} unchanged, ${failed} failed — ` +
+        `library holds ${envelopes.length + downloaded} threads${stopped}${reasonNote}.`,
+      failed ? 'warn' : 'ok'
+    );
+    await refreshSearchIndex();
+  } catch (e) {
+    setStatus(`Download failed: ${e.message}`, 'err');
+  } finally {
+    bulkRunning = false;
+    bulkAbort = false;
+    downloadBtn.textContent = 'Download all';
+    rebuildBtn.disabled = false;
+    updateButtons();
+    renderList();
+  }
+}
+
+// Small in-memory diff-index mirror (persisted via state.js, best-effort).
+function diffIndexPut(id, updated) {
+  setDiffEntry(id, updated); // fire-and-forget
+}
+
+// ---------------------------------------------------------------------------
+// STAGE 2 — EXPORT: library JSON -> vault (markdown) + optional plain folder.
+
+function exportAllTrigger() {
+  if (bulkRunning) {
+    bulkAbort = true;
+    setStatus('Stopping after the current export…', 'warn');
+    return;
+  }
+  exportTargets(null);
+}
+
+async function exportChecked() {
+  if (bulkRunning) return;
+  const targets = conversations.filter((c) => checkedIds.has(c.id));
+  if (!targets.length) return;
+  exportTargets(targets);
+}
+
+async function exportTargets(targets) {
+  // Grants must happen inside the click gesture.
+  const vault = await getArchiveHandle({ interactive: true }).catch(() => null);
+  if (!vault) {
+    setStatus('No vault folder granted — click 📁 (or ⚙ Settings).', 'err');
+    return;
+  }
+  await refreshFolderStatus();
+  const plain = await getPlainHandle({ interactive: true }).catch(() => null); // optional
+  const st = await loadState();
+  const plainFormat = st.plainFormat || 'md';
+
+  if (!targets) {
+    const { envelopes, noLibrary } = await readLibraryEnvelopes();
+    if (noLibrary || !envelopes.length) {
+      setStatus('Library is empty — run Download all first.', 'warn');
+      return;
+    }
+    targets = envelopes.map((env) => ({ id: env.id, title: env.title, updated: env.updated }));
+  }
+
+  bulkRunning = true;
+  bulkAbort = false;
+  const prevLabel = exportAllBtn.textContent;
+  exportAllBtn.textContent = 'Stop';
+  downloadBtn.disabled = true;
+  exportSelBtn.disabled = true;
+  moreBtn.hidden = true;
+  rebuildBtn.disabled = true;
+  digestBtn.disabled = true;
+  loadAllBtn.disabled = true;
+
+  try {
+    // Diff-before-export: what's the vault already holding (id -> updated)?
+    const { envelopes: vaultEnvs } = await readVaultEnvelopes();
+    const vaultUpdated = new Map(vaultEnvs.map((e) => [e.id, e.updated || e.created || '']));
+    // And the live list — for the staleness check the user asked for:
+    // "before we push it out, compare and see if the JSON we have is up to date".
+    const listById = new Map(conversations.map((c) => [c.id, c]));
+
+    let exported = 0;
+    let refreshed = 0;
+    let unchanged = 0;
+    let failed = 0;
+    let consecutiveFails = 0;
+    const failures = [];
+
+    for (let i = 0; i < targets.length; i++) {
+      if (bulkAbort) break;
+      const t = targets[i];
+      let env = (await readLibraryEnvelopesOne(t.id));
+
+      // Staleness check: the live list is newer than our library JSON?
+      const live = listById.get(t.id);
+      if (env && live && live.updated && env.updated && live.updated > env.updated) {
+        setStatus(`Refreshing ${i + 1}/${targets.length}: ${t.title}`, 'warn');
+        try {
+          const raw = await getConversation(t.id);
+          env = buildEnvelope(normalizeConversation(raw));
+          await writeLibraryThread(env);
+          diffIndexPut(t.id, env.updated || env.created || '');
+          refreshed++;
+        } catch (e) {
+          // Can't refresh (rate limit etc.) — export what we have rather than
+          // blocking the whole batch; the next run will try again.
+          console.warn(`[convo-hist ${BUILD}] refresh skipped: "${t.title}" — ${e.message}`);
+        }
+      }
+      if (!env) continue; // not in the library and refresh failed — skip quietly
+
+      if (vaultUpdated.get(t.id) && env.updated && env.updated <= vaultUpdated.get(t.id)) {
+        exportedIds.add(t.id);
+        checkedIds.delete(t.id);
+        unchanged++;
+        continue;
+      }
+
+      setStatus(`Exporting ${i + 1}/${targets.length}: ${env.title}`, 'warn');
+      try {
+        const md = renderMarkdown(env);
+        await writeArchiveFile(env, md, { includeJson: false });
+        if (plain) await writePlainFile(env, md, plainFormat);
+        exportedIds.add(t.id);
+        checkedIds.delete(t.id);
+        exported++;
+        consecutiveFails = 0;
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        console.warn(`[convo-hist ${BUILD}] export failed: "${env.title}" (${env.id}) — ${msg}`);
+        if (failures.length < 3) failures.push(`${env.title}: ${msg}`);
+        failed++;
+        consecutiveFails++;
+        if (consecutiveFails >= 3) {
+          setStatus(`Export paused: 3 in a row failed (last: ${msg}). Run Export all again to resume.`, 'err');
+          return;
+        }
+      }
+      await sleep(120);
+    }
+
+    let indexNote = '';
     try {
-      const { envelopes } = await readArchiveEnvelopes();
+      const { envelopes } = await readLibraryEnvelopes();
       await writeDerivedViews(buildAllIndexes(envelopes));
       searchState = buildSearchIndex(envelopes);
       archivedCount = envelopes.length;
@@ -553,33 +519,349 @@ async function captureChecked() {
       indexNote = ' · indexes not updated';
     }
 
-    const stopped = bulkAbort ? ' (stopped early)' : '';
+    const stopped = bulkAbort ? ' (stopped early — run Export all again to resume)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
     setStatus(
-      `Batch done: ${captured} captured, ${unchanged} unchanged, ${failed} failed${indexNote}${stopped}${reasonNote}.`,
+      `Export done: ${exported} written, ${unchanged} unchanged, ${refreshed} refreshed, ${failed} failed` +
+        `${indexNote}${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
-    setStatus(`Batch failed: ${e.message}`, 'err');
+    setStatus(`Export failed: ${e.message}`, 'err');
   } finally {
     bulkRunning = false;
     bulkAbort = false;
-    captureAllBtn.textContent = prevLabel;
+    exportAllBtn.textContent = prevLabel;
     rebuildBtn.disabled = false;
-    updateCaptureButton();
+    updateButtons();
     renderList();
   }
 }
 
+// Vault readers (what's already exported).
+async function readVaultEnvelopes() {
+  try {
+    return await readArchiveEnvelopes();
+  } catch {
+    return { envelopes: [] };
+  }
+}
+
+// Single library envelope by id (scan once, cache for the batch).
+let libCache = null;
+async function readLibraryEnvelopesOne(id) {
+  if (!libCache) {
+    const { envelopes } = await readLibraryEnvelopes();
+    libCache = new Map(envelopes.map((e) => [e.id, e]));
+  }
+  return libCache.get(id) || null;
+}
+function invalidateLibCache() { libCache = null; }
+
 // ---------------------------------------------------------------------------
-// Results mode — tags-first cards over the archived (disk) conversations.
+// Row actions — 📄J (copy JSON) / 📄M (copy markdown, rendered on the fly).
+
+async function copyThread(chatId, fmt) {
+  invalidateLibCache();
+  const env = await readLibraryEnvelopesOne(chatId);
+  if (!env) {
+    setStatus('Thread not in the library yet — run Download all.', 'warn');
+    return;
+  }
+  const text = fmt === 'json' ? JSON.stringify(env, null, 2) : renderMarkdown(env);
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`Copied ${fmt === 'json' ? 'JSON' : 'markdown'}: ${env.title}`, 'ok');
+  } catch {
+    setStatus('Clipboard blocked by the browser.', 'err');
+  }
+}
+
+// Single-thread export (double-click a row): refresh-if-stale, then export.
+async function capture(chatId) {
+  setStatus('Preparing thread…');
+  invalidateLibCache();
+  let env = await readLibraryEnvelopesOne(chatId);
+  const live = conversations.find((c) => c.id === chatId);
+  if (!env || (live && live.updated && env.updated && live.updated > env.updated)) {
+    try {
+      const raw = await getConversation(chatId);
+      env = buildEnvelope(normalizeConversation(raw));
+      await writeLibraryThread(env);
+      diffIndexPut(chatId, env.updated || env.created || '');
+      invalidateLibCache();
+    } catch (err) {
+      setStatus(`Fetch failed: ${err.message}${authHint(err)}`, 'err');
+      if (!env) return; // nothing to export
+    }
+  }
+
+  const vault = await getArchiveHandle({ interactive: true }).catch(() => null);
+  if (!vault) {
+    setStatus('No vault folder granted — click 📁 first.', 'err');
+    return;
+  }
+  const plain = await getPlainHandle({ interactive: true }).catch(() => null);
+  const st = await loadState();
+  const plainFormat = st.plainFormat || 'md';
+
+  try {
+    const md = renderMarkdown(env);
+    await writeArchiveFile(env, md, { includeJson: false });
+    if (plain) await writePlainFile(env, md, plainFormat);
+    exportedIds.add(chatId);
+    renderList();
+
+    let indexNote = '';
+    try {
+      const { envelopes } = await readLibraryEnvelopes();
+      await writeDerivedViews(buildAllIndexes(envelopes));
+      searchState = buildSearchIndex(envelopes);
+      archivedCount = envelopes.length;
+      indexNote = ` · indexes + search updated (${envelopes.length})`;
+    } catch {
+      indexNote = ' · indexes not updated';
+    }
+    try {
+      await navigator.clipboard.writeText(md);
+      setStatus(`Exported ${env.title}${indexNote} · copied to clipboard`, 'ok');
+    } catch {
+      setStatus(`Exported ${env.title}${indexNote} (clipboard blocked)`, 'ok');
+    }
+  } catch (e) {
+    setStatus(`Export failed: ${e.message}`, 'err');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// M4 digest — summarizes/tags LIBRARY threads in place (JSON is the truth;
+// the vault markdown refreshes on the next export).
+
+async function digestMissing() {
+  if (bulkRunning) {
+    bulkAbort = true;
+    setStatus('Stopping after the current digest…', 'warn');
+    return;
+  }
+
+  const lib = await getLibraryHandle({ interactive: true }).catch(() => null);
+  if (!lib) {
+    setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
+    return;
+  }
+  const { envelopes } = await readLibraryEnvelopes();
+  const targets = envelopes.filter((env) => !env.summary || !(env.tags || []).length);
+  if (!targets.length) {
+    setStatus(`Nothing to digest — all ${envelopes.length} threads already have summaries.`, 'ok');
+    return;
+  }
+
+  bulkRunning = true;
+  bulkAbort = false;
+  exportAllBtn.textContent = 'Stop';
+  downloadBtn.disabled = true;
+  exportSelBtn.disabled = true;
+  moreBtn.hidden = true;
+  rebuildBtn.disabled = true;
+  digestBtn.disabled = true;
+  loadAllBtn.disabled = true;
+
+  let done = 0;
+  let failed = 0;
+  let backendLabel = '';
+  let consecutiveFails = 0;
+  const failures = [];
+
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      if (bulkAbort) break;
+      const env = targets[i];
+      setStatus(`Digesting ${i + 1}/${targets.length}: ${env.title}`, 'warn');
+      try {
+        const d = await digestTurns(env);
+        env.summary = d.summary;
+        env.tags = d.tags;
+        backendLabel = d.backend;
+        await writeLibraryThread(env);
+        invalidateLibCache();
+        done++;
+        consecutiveFails = 0;
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        console.warn(`[convo-hist ${BUILD}] digest failed: "${env.title}" (${env.id}) — ${msg}`);
+        if (failures.length < 3) failures.push(`${env.title}: ${msg}`);
+        failed++;
+        consecutiveFails++;
+        if (consecutiveFails >= 3) {
+          setStatus(`Digest paused: 3 failures in a row (last: ${msg}).`, 'err');
+          return;
+        }
+      }
+      await sleep(300);
+    }
+
+    try {
+      const { envelopes: fresh } = await readLibraryEnvelopes();
+      await writeDerivedViews(buildAllIndexes(fresh));
+      searchState = buildSearchIndex(fresh);
+      archivedCount = fresh.length;
+    } catch { /* indexes refresh on next rebuild */ }
+
+    const stopped = bulkAbort ? ' (stopped early)' : '';
+    const reasonNote = failed
+      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — console)` : ''}`
+      : '';
+    setStatus(
+      `Digest done: ${done} summarized via ${backendLabel || 'fallback'}, ${failed} failed${reasonNote}${stopped}. ` +
+        'Run Export all to refresh the vault markdown.',
+      failed ? 'warn' : 'ok'
+    );
+  } catch (e) {
+    setStatus(`Digest failed: ${e.message}`, 'err');
+  } finally {
+    bulkRunning = false;
+    bulkAbort = false;
+    exportAllBtn.textContent = 'Export all';
+    rebuildBtn.disabled = false;
+    updateButtons();
+    renderList();
+  }
+}
+
+// Rebuild derived views from the library (the source of truth).
+async function rebuildFromLibrary() {
+  setStatus('Reading library…');
+  try {
+    const { envelopes, skipped, noLibrary } = await readLibraryEnvelopes();
+    if (noLibrary) {
+      setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
+      return;
+    }
+    if (!envelopes.length) {
+      setStatus('Library is empty — run Download all first.', 'warn');
+      return;
+    }
+    const { files } = await writeDerivedViews(buildAllIndexes(envelopes));
+    searchState = buildSearchIndex(envelopes);
+    archivedCount = envelopes.length;
+    setStatus(
+      `Rebuilt: ${files} index files from ${envelopes.length} threads` +
+        (skipped ? ` (${skipped} unreadable skipped)` : ''),
+      'ok'
+    );
+  } catch (e) {
+    setStatus(`Rebuild failed: ${e.message}`, 'err');
+  }
+}
+
+async function refreshSearchIndex() {
+  try {
+    const { envelopes } = await readLibraryEnvelopes();
+    searchState = buildSearchIndex(envelopes);
+    archivedCount = envelopes.length;
+  } catch (e) {
+    console.error('search index build failed:', e);
+    searchState = null;
+    archivedCount = 0;
+  }
+}
+
+function updateButtons() {
+  const n = checkedIds.size;
+  exportSelBtn.textContent = n > 0 ? `Export selected (${n})` : 'Export selected';
+  exportSelBtn.disabled = bulkRunning || n === 0;
+  selCountEl.textContent = `${n} selected`;
+  loadAllBtn.hidden = !hasMore || bulkRunning;
+  digestBtn.disabled = bulkRunning;
+}
+
+function updateSelAllState(shown) {
+  const list = shown || conversations;
+  const n = list.filter((c) => checkedIds.has(c.id)).length;
+  selAllEl.checked = list.length > 0 && n === list.length;
+  selAllEl.indeterminate = n > 0 && n < list.length;
+}
+
+function renderList() {
+  const q = searchEl.value.trim().toLowerCase();
+  listEl.innerHTML = '';
+
+  const shown = q
+    ? conversations.filter((c) => c.title.toLowerCase().includes(q))
+    : conversations;
+
+  updateSelAllState(shown);
+  updateButtons();
+
+  if (!shown.length) {
+    listEl.innerHTML = `<div class="notice">${
+      q ? 'No matches.' : 'No conversations found.'
+    }</div>`;
+    return;
+  }
+
+  for (const c of shown) {
+    const div = document.createElement('div');
+    div.className = 'chat-item' + (exportedIds.has(c.id) ? ' captured' : '');
+    div.role = 'option';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = checkedIds.has(c.id);
+    cb.title = 'Select for export';
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      if (cb.checked) checkedIds.add(c.id);
+      else checkedIds.delete(c.id);
+      updateButtons();
+      updateSelAllState(shown);
+    });
+
+    const body = document.createElement('div');
+    body.className = 'body';
+    const t = document.createElement('span');
+    t.className = 't';
+    t.textContent = c.title;
+    t.title = c.title;
+    const m = document.createElement('span');
+    m.className = 'm';
+    m.textContent = c.updated ? `updated ${c.updated.slice(0, 10)}` : '';
+    body.append(t, m);
+
+    const btnJson = document.createElement('button');
+    btnJson.className = 'rowbtn';
+    btnJson.textContent = '📄J';
+    btnJson.title = 'Copy this thread\'s JSON to the clipboard';
+    btnJson.setAttribute('data-copy', c.id);
+    btnJson.dataset.fmt = 'json';
+
+    const btnMd = document.createElement('button');
+    btnMd.className = 'rowbtn';
+    btnMd.textContent = '📄M';
+    btnMd.title = 'Copy this thread\'s markdown to the clipboard';
+    btnMd.setAttribute('data-copy', c.id);
+    btnMd.dataset.fmt = 'md';
+
+    div.append(cb, body, btnJson, btnMd);
+    div.addEventListener('click', (e) => {
+      if (e.target.closest('.rowbtn')) return; // buttons handle themselves
+      cb.checked = !cb.checked;
+      cb.dispatchEvent(new Event('change'));
+    });
+    div.addEventListener('dblclick', () => capture(c.id));
+    listEl.appendChild(div);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Results mode — tags-first cards over the library threads.
 
 function renderResults(q) {
   if (!searchState) {
     listEl.innerHTML =
-      '<div class="notice">Archive not indexed yet.<br>Grant the folder, then click “Rebuild from disk”.</div>';
+      '<div class="notice">Nothing indexed yet.<br>Run Download all, then Rebuild.</div>';
     return;
   }
 
@@ -621,90 +903,4 @@ function resultCardHtml(g, tokens) {
     `<button class="r-open ghost" data-open="${escapeHtml(g.convId)}">Open in ChatGPT ↗</button>` +
     '</div>'
   );
-}
-
-// Regenerate indexes/ from the canonical files on disk — the browser-side
-// cache plays no part; this works even after "Clear site data".
-async function rebuildFromDisk() {
-  setStatus('Reading archive from disk…');
-  try {
-    const { envelopes, skipped, noFolder } = await readArchiveEnvelopes();
-    if (noFolder) {
-      setStatus('No archive folder granted — click the folder button first.', 'err');
-      return;
-    }
-    if (!envelopes.length) {
-      setStatus('Nothing archived yet — capture a conversation first.', 'warn');
-      return;
-    }
-    const indexes = buildAllIndexes(envelopes);
-    const { files } = await writeDerivedViews(indexes);
-    searchState = buildSearchIndex(envelopes);
-    archivedCount = envelopes.length;
-    // Resync the browser-side diff index from the authoritative envelopes —
-    // this heals drift (hand edits, deletions, another machine's captures).
-    diffIndex = {};
-    for (const e of envelopes) diffIndex[e.id] = e.updated || e.created || '';
-    await saveDiffMap(diffIndex);
-    setStatus(
-      `Indexes rebuilt: ${files} files from ${envelopes.length} conversations` +
-        (skipped ? ` (${skipped} unreadable skipped)` : ''),
-      'ok'
-    );
-  } catch (e) {
-    setStatus(`Rebuild failed: ${e.message}`, 'err');
-  }
-}
-
-async function capture(chatId) {
-  setStatus('Fetching conversation…');
-
-  let raw;
-  try {
-    raw = await getConversation(chatId);
-  } catch (err) {
-    setStatus(`Fetch failed: ${err.message}${authHint(err)}`, 'err');
-    return;
-  }
-
-  try {
-    const norm = normalizeConversation(raw);
-    const env = buildEnvelope(norm);
-    const md = renderMarkdown(env);
-
-    // Folder grant needs a user gesture — the capture click is one.
-    const folder = await getArchiveHandle({ interactive: true }).catch(() => null);
-    if (!folder) {
-      setStatus('No archive folder granted — click the folder button first.', 'err');
-      return;
-    }
-
-    const paths = await writeArchiveFile(env, md);
-    capturedIds.add(chatId);
-    diffIndex[chatId] = env.updated || env.created || '';
-    setDiffEntry(chatId, diffIndex[chatId]);
-    renderList();
-
-    // Keep indexes/ and the search index in sync with every capture.
-    let indexNote = '';
-    try {
-      const { envelopes } = await readArchiveEnvelopes();
-      const indexes = buildAllIndexes(envelopes);
-      await writeDerivedViews(indexes);
-      searchState = buildSearchIndex(envelopes);
-      archivedCount = envelopes.length;
-      indexNote = ` · indexes + search updated (${envelopes.length})`;
-    } catch {
-      indexNote = ' · indexes not updated';
-    }
-
-    try {
-      await navigator.clipboard.writeText(md);
-      setStatus(`Saved ${paths.mdPath} + .json${indexNote} · copied to clipboard`, 'ok');
-    } catch {
-      setStatus(`Saved ${paths.mdPath} + .json${indexNote} (clipboard blocked)`, 'ok');
-    }
-  } catch (e) {
-    setStatus(`Capture failed: ${e.message}`, 'err');
-  }
 }
