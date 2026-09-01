@@ -18,15 +18,15 @@
 
   <section class="searchbar">
     <div class="searchrow">
-      <input id="search" type="search" placeholder="Search your archive…" autofocus />
-      <button id="reload-btn" class="ghost" title="Reload conversation list">↻</button>
+      <input id="search" type="search" placeholder="Search your archive…" title="Search inside downloaded threads — filters: user: assistant: code:" autofocus />
+      <button id="reload-btn" class="ghost" title="Re-read the library folder (picks up manually added files)">↻</button>
     </div>
     <span id="search-hint" class="hint">message-level search · filters: user: assistant: code:</span>
   </section>
 
   <section class="list-tools">
-    <label class="selall"><input type="checkbox" id="sel-all" /> Select all</label>
-    <span id="sel-count" class="hint">0 selected</span>
+    <label class="selall" title="Check every thread in the list for export"><input type="checkbox" id="sel-all" /> Select all</label>
+    <span id="sel-count" class="hint" title="How many threads are selected for export">0 selected</span>
     <span id="library-hint" class="hint"></span>
     <span class="spacer"></span>
     <button id="load-all-btn" class="ghost" hidden title="Fetch every page of the conversation list">Load all</button>
@@ -38,8 +38,20 @@
     <button id="capture-btn" class="primary" title="Download new + changed threads from ChatGPT into the library folder">Download</button>
     <button id="capture-all-btn" class="ghost" title="Write the selected threads (or all) to the vault folder as markdown">Export</button>
     <button id="digest-btn" class="ghost" title="Summarize + tag library threads that lack it">Digest</button>
-    <button id="more-btn" class="ghost" hidden>Load more</button>
+    <button id="more-btn" class="ghost" hidden title="Fetch the next page of the conversation list">Load more</button>
   </section>
+
+  <div id="coach" class="coach" hidden>
+    <div class="coach-card">
+      <h2 id="coach-title">Welcome to Convo Hist</h2>
+      <p id="coach-body"></p>
+      <div class="coach-foot">
+        <span id="coach-step" class="coach-step"></span>
+        <button id="coach-skip" class="ghost">Skip</button>
+        <button id="coach-next" class="primary">Next</button>
+      </div>
+    </div>
+  </div>
 
   <div id="progress" class="progress" hidden>
     <div class="flower" id="progress-flower" hidden></div>

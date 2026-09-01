@@ -70,6 +70,18 @@ export async function setIncludeJson(v) {
   await persist(st);
 }
 
+// First-run coach: shown once per install, never again after dismissal.
+export async function getTourDone() {
+  const st = await loadState();
+  return !!st.tourDone;
+}
+
+export async function setTourDone() {
+  const st = await loadState();
+  st.tourDone = true;
+  await persist(st);
+}
+
 // ---------------------------------------------------------------------------
 // Settings (written by the settings window, read everywhere).
 

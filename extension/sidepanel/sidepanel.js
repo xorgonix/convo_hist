@@ -31,6 +31,7 @@ import {
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
+import { loadState, getTourDone, setTourDone } from '../lib/state.js';
 import { digestTurns } from '../lib/summarize.js';
 
 const BATCH = 50;
@@ -119,8 +120,57 @@ async function init() {
   await refreshLibraryStatus();
   await loadLibrary();
 
-  // Download auto-starts. e2e pages skip it for deterministic tests.
+  // First-run coach: shown once, skippable, never again.
+  if (!isE2e() && !(await getTourDone())) showCoach();
+
+  // STAGE 1 auto-starts. e2e pages skip it for deterministic tests.
   if (!isE2e()) downloadAll();
+}
+
+// ---------------------------------------------------------------------------
+// First-run coach — one-time, skippable 3-step orientation.
+
+const COACH_STEPS = [
+  {
+    title: 'Welcome to Convo Hist',
+    body: '<b>Download</b> pulls your ChatGPT threads into a library folder on disk — one JSON file per thread. It runs automatically, and resumes if interrupted.',
+  },
+  {
+    title: 'Export to your vault',
+    body: '<b>Export</b> writes markdown into your vault folder (Obsidian-ready, with frontmatter). Select specific threads, or export everything. No JSON ever goes to the vault.',
+  },
+  {
+    title: '⚙ and ? live up here',
+    body: '<b>Settings</b> holds your folders and the summarizer config. <b>Help</b> explains every button and status message — any time.',
+  },
+];
+
+function showCoach() {
+  const overlay = $('coach');
+  const title = $('coach-title');
+  const body = $('coach-body');
+  const stepEl = $('coach-step');
+  const next = $('coach-next');
+  let i = 0;
+
+  const paint = () => {
+    title.textContent = COACH_STEPS[i].title;
+    body.innerHTML = COACH_STEPS[i].body;
+    stepEl.textContent = `${i + 1} / ${COACH_STEPS.length}`;
+    next.textContent = i === COACH_STEPS.length - 1 ? 'Got it' : 'Next';
+  };
+  const close = async () => {
+    overlay.hidden = true;
+    await setTourDone();
+  };
+
+  $('coach-skip').addEventListener('click', close);
+  $('coach-next').addEventListener('click', () => {
+    if (++i >= COACH_STEPS.length) close(); else paint();
+  });
+
+  paint();
+  overlay.hidden = false;
 }
 
 function setStatus(text, kind = '') {

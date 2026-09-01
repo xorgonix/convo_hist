@@ -234,6 +234,48 @@ input[type="checkbox"] { accent-color: var(--accent); }
 @keyframes flower-spin {
   to { transform: rotate(360deg); }
 }
+
+/* First-run coach overlay */
+.coach {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.coach[hidden] { display: none; }
+.coach-card {
+  background: var(--bg, #16181d);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 18px 20px;
+  max-width: 320px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.coach-card h2 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  color: var(--accent, #6ea8ff);
+}
+.coach-card p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text, #e6e6e6);
+  margin: 0 0 14px;
+  min-height: 54px;
+}
+.coach-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.coach-step {
+  color: var(--dim);
+  font-size: 10px;
+  align-self: center;
+}
 .status.warn { color: var(--warn); }
 .status.err { color: var(--err); }
 
