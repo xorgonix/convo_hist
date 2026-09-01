@@ -9,7 +9,7 @@
 //
 // BUILD stamp is logged at import so stale-code confusion dies forever.
 
-export const BUILD = 'v0.4.0-library';
+export const BUILD = 'v0.4.1-fix';
 
 const ORIGIN = 'https://chatgpt.com';
 const TOKEN_TTL_MS = 10 * 60 * 1000;

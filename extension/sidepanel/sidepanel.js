@@ -23,6 +23,7 @@ import {
   getArchiveHandle, writeArchiveFile, archiveStatus,
   getLibraryHandle, libraryStatus,
   getPlainHandle, writePlainFile, plainStatus,
+  readArchiveEnvelopes, readLibraryEnvelopes,
   writeDerivedViews,
 } from '../lib/fsaccess.js';
 import { buildAllIndexes } from '../lib/indexes.js';
