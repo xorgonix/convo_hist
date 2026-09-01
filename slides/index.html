@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Convo Hist — Architecture &amp; User Walkthrough</title>
+  <link rel="stylesheet" href="https://unpkg.com/reveal.js@5.0.4/dist/reveal.css" />
+  <link rel="stylesheet" href="https://unpkg.com/reveal.js@5.0.4/dist/theme/black.css" />
+  <style>
+    :root { --accent: #6ea8ff; --accent2: #c39bff; --ok: #7ad48a; --dim: #9aa4b2; }
+    .reveal { font-size: 30px; }
+    .reveal h1, .reveal h2, .reveal h3 { text-transform: none; }
+    .reveal h2 { color: var(--accent); border-bottom: 1px solid #333; padding-bottom: 8px; }
+    .reveal .dim { color: var(--dim); }
+    .reveal .ok { color: var(--ok); }
+    .reveal .accent { color: var(--accent); }
+    .reveal pre { width: 100%; font-size: 0.55em; box-shadow: none; }
+    .reveal code { color: var(--accent2); }
+    .reveal table { font-size: 0.72em; }
+    .reveal ul { min-width: 60%; }
+    .reveal .cols { display: flex; gap: 40px; }
+    .reveal .cols > div { flex: 1; text-align: left; }
+    .reveal .flow { font-size: 0.85em; line-height: 1.5; }
+    .reveal .cover .sub { color: var(--dim); font-size: 0.7em; }
+    .reveal .kicker { color: var(--accent); font-size: 0.6em; letter-spacing: 0.2em; text-transform: uppercase; }
+    .reveal .small { font-size: 0.65em; }
+  </style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<section class="cover" data-background-color="#101418">
+  <h1>Convo Hist</h1>
+  <p class="sub">A local-first archiver for your ChatGPT conversations</p>
+  <p class="dim small">v0.5.0 — Library flow · Markdown vault · Digest engine</p>
+</section>
+
+<section>
+  <p class="kicker">The problem</p>
+  <h2>Your ChatGPT history is a black box</h2>
+  <ul>
+    <li>Thousands of conversations, locked behind one web UI</li>
+    <li>Search is shallow, no tags, no offline access</li>
+    <li>No way to back up, export, or keep what you built</li>
+    <li>If the account goes, the work goes</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">What it is</p>
+  <h2>Every thread, as your own files</h2>
+  <ul>
+    <li><b>One JSON per thread</b> — full, lossless, machine-readable</li>
+    <li><b>One Markdown per thread</b> — with frontmatter, Obsidian-ready</li>
+    <li>Search, tags, summaries — computed locally</li>
+    <li>A Chrome side panel — no servers, no accounts, no telemetry</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Design principles</p>
+  <h2>Three rules, held since day one</h2>
+  <ul>
+    <li><b>Files are the source of truth.</b> Browser storage holds only caches.</li>
+    <li><b>A line in the panel means a file on disk.</b> The list is the library.</li>
+    <li><b>Be polite to the API.</b> Paced, throttled, resumable — never hammer.</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">The flow</p>
+  <h2>Two stages, two folders</h2>
+  <pre class="flow">
+STAGE 1 — DOWNLOAD                    STAGE 2 — EXPORT
+ChatGPT ──► LIBRARY folder            LIBRARY ──► VAULT folder
+one JSON per thread                   markdown + frontmatter
+new &amp; changed only                    markdown or JSON to a
+paced · throttled · resumable         second folder (optional)
+  </pre>
+  <p class="small dim">The library is the source of truth. The vault is the reading copy.</p>
+</section>
+
+<section>
+  <p class="kicker">Stage 1</p>
+  <h2>Download</h2>
+  <ul>
+    <li>Auto-runs when the panel opens; resumable forever</li>
+    <li>Diffs the live ChatGPT list against the library — fetches only new + changed</li>
+    <li>Pacing starts at 400ms; rate governor raises it to 8s when 429s appear</li>
+    <li>Server <code>retry-after</code> is honored exactly</li>
+    <li>Circuit breaker pauses after 3 consecutive failures — press Download to resume</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Stage 1 output</p>
+  <h2>The library folder</h2>
+  <pre>threads/
+  Kubernetes Networking Deep Dive (6a113fa5).json
+  Sourdough Starter Guide (6a11289e).json
+  ...</pre>
+  <p class="small dim">Deterministic names — re-download overwrites in place. Title changes clean up the old file.</p>
+</section>
+
+<section>
+  <p class="kicker">Stage 2</p>
+  <h2>Export</h2>
+  <ul>
+    <li>Selected threads, or everything when nothing is selected</li>
+    <li><b>Diff-before-export:</b> each library JSON is compared with ChatGPT's live list — stale threads are refreshed first</li>
+    <li>Writes markdown to the vault; optionally markdown/JSON to a second folder</li>
+    <li>Pure local disk writes — instant, no network</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Stage 2 output</p>
+  <h2>The vault folder</h2>
+  <pre>---
+source: chatgpt
+chat_id: "6a113fa5-52b4-83ea-9453-6e3d1c6c7ac9"
+title: Dialogue and Requirements Discovery
+created: 2026-08-30T14:22:05.000Z
+updated: 2026-08-31T09:12:44.000Z
+captured: 2026-08-31T15:03:11.000Z
+model: gpt-5.3
+tags: [requirements, dialogue]
+summary: "..."
+---
+# Dialogue and Requirements Discovery
+## USER — 2026-08-30 14:22
+...</pre>
+  <p class="small dim">Obsidian never sees JSON — markdown only.</p>
+</section>
+
+<section>
+  <p class="kicker">The panel</p>
+  <h2>The list is the library</h2>
+  <ul>
+    <li>A line item means the JSON file exists on disk — nothing else is listed</li>
+    <li>Click = select for export · Select all at the top · double-click = export one</li>
+    <li>📄J copies the thread's JSON · 📄M copies freshly-rendered markdown</li>
+    <li>Search box searches inside threads, not just titles</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Settings</p>
+  <h2>⚙ Everything configurable</h2>
+  <ul>
+    <li><b>Library folder</b> — where downloaded JSONs live</li>
+    <li><b>Vault folder</b> — markdown export destination</li>
+    <li><b>Second output folder</b> — markdown or JSON</li>
+    <li><b>Summarizer</b> — auto / Gemini Nano / Ollama / LM Studio / extractive</li>
+    <li><b>Ollama URL + model</b></li>
+    <li><b>Test button</b> per folder — writes a marker file so you can verify the exact location in Explorer</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Honest constraint</p>
+  <h2>Why the "Test" button exists</h2>
+  <p>The File System Access API cannot reveal a granted folder's full path — the browser hides it by design.</p>
+  <p>So Settings writes <code>_convo_hist_here.txt</code> into each configured folder. You look in Explorer and <i>know</i>.</p>
+</section>
+
+<section>
+  <p class="kicker">Digest engine</p>
+  <h2>Summaries + tags, four ways</h2>
+  <pre>1. Gemini Nano   — built into Chrome, on-device
+2. Ollama        — localhost:11434, model auto-detected
+3. LM Studio     — localhost:1234, OpenAI-compatible
+4. Extractive    — built-in TextRank-lite, zero dependencies</pre>
+  <p class="small dim">LLM trouble degrades per-conversation to the fallback — the feature never fails.</p>
+</section>
+
+<section>
+  <p class="kicker">Digest engine</p>
+  <h2>What it writes</h2>
+  <ul>
+    <li>2–3 sentence <b>summary</b> per thread</li>
+    <li>3–7 lowercase <b>tags</b>, normalized</li>
+    <li>Written into the library JSON — then Export refreshes the vault</li>
+    <li>Search results show tag chips; summaries appear on result cards</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Search</p>
+  <h2>Inside the threads, not just the titles</h2>
+  <pre>hydration                    any message (fuzzy, prefix-matched)
+code:                        only threads with code blocks
+user: hydration              only your messages
+assistant: networkpolicy     only assistant replies</pre>
+  <p class="small dim">Custom inverted index: IDF-weighted, grouped per conversation, snippet + highlight.</p>
+</section>
+
+<section>
+  <p class="kicker">Resilience</p>
+  <h2>Built for a hostile, unofficial API</h2>
+  <ul>
+    <li>Every fetch time-boxed (15s) — no silent hangs</li>
+    <li>4xx answers are final — no wasteful duplicate retries</li>
+    <li>429 → pacing doubles automatically, up to 8s; <code>retry-after</code> honored</li>
+    <li>Circuit breaker: 3 consecutive failures pause the batch, cleanly</li>
+    <li>Everything resumable — a paused run costs nothing to restart</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Privacy</p>
+  <h2>The data flow, in full</h2>
+  <ul>
+    <li>Reads chatgpt.com using <b>your</b> logged-in session — nothing else on the network</li>
+    <li>Writes only the folders you explicitly granted</li>
+    <li>No analytics, no accounts, no remote code</li>
+    <li>Browser storage: tiny caches (list, settings) — thread JSON lives in your folders</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Verification</p>
+  <h2>A browser-level test suite, not hope</h2>
+  <ul>
+    <li>Go + Rod: real Chromium, real extension, mocked ChatGPT API</li>
+    <li>26 tests: smoke, journeys, edge cases, fault injection (401, 429, malformed)</li>
+    <li>Local TLS mock server covers panel <i>and</i> service-worker contexts</li>
+    <li>Screenshots, videos, per-test logs on every run</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Verification in practice</p>
+  <h2>A real defect it caught</h2>
+  <ul>
+    <li>Spec: re-capturing a renamed thread should remove the old files</li>
+    <li>Test proved it silently no-oped — code called a nonexistent <code>handle.remove()</code></li>
+    <li>Duplicate files accumulated forever, invisibly</li>
+    <li>Fixed with <code>dir.removeEntry()</code>, re-verified — both results reported</li>
+  </ul>
+</section>
+
+<section>
+  <p class="kicker">Install</p>
+  <h2>Five minutes</h2>
+  <pre>1. chrome://extensions → Developer mode → Load unpacked → extension/
+2. Pin "Convo Hist" → click → side panel opens
+3. ⚙ Settings → set Library + Vault folders → press Test on each
+4. Download runs by itself
+5. Export → your vault fills with markdown</pre>
+</section>
+
+<section>
+  <p class="kicker">Troubleshooting</p>
+  <h2>The status bar tells the truth</h2>
+  <table>
+    <tr><td>Download paused (3 in a row)</td><td>rate limits — press Download to resume</td></tr>
+    <tr><td>HTTP 401/403</td><td>log in at chatgpt.com, reload the list</td></tr>
+    <tr><td>library: not set</td><td>⚙ Settings → choose the library folder</td></tr>
+    <tr><td>build: loading… stuck</td><td>stale panel — close and reopen</td></tr>
+  </table>
+</section>
+
+<section>
+  <p class="kicker">Roadmap</p>
+  <h2>Where this goes</h2>
+  <ul>
+    <li>Auto-digest on download — no button needed</li>
+    <li>Local Go "brain" service (localhost:8080 slot already reserved)</li>
+    <li>SurrealDB + ontology ingestion of the envelopes</li>
+    <li>Scheduled self-maintaining archive</li>
+  </ul>
+</section>
+
+<section>
+  <h1>Own your history.</h1>
+  <p class="sub">Files you can open. A search that works. Nothing you don't control.</p>
+  <p class="dim small">USERGUIDE.md · slides/index.html · browser-tests/ · extension/SPECS/APPROACH.md</p>
+</section>
+
+</div>
+</div>
+<script src="https://unpkg.com/reveal.js@5.0.4/dist/reveal.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'fade',
+    width: 1280,
+    height: 760,
+  });
+</script>
+</body>
+</html>
