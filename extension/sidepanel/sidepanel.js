@@ -127,6 +127,31 @@ function setStatus(text, kind = '') {
   statusEl.className = 'status ' + kind;
 }
 
+// Progress indicator: spinner for unknown-length phases, bar for i/N.
+const progressEl = $('progress');
+const progressFlower = $('progress-flower');
+const barFill = $('bar-fill');
+const progressLabel = $('progress-label');
+
+function progressSpin(label) {
+  progressEl.hidden = false;
+  progressFlower.hidden = false;
+  barFill.style.width = '0%';
+  progressLabel.textContent = label || '';
+}
+function progressUpdate(done, total, label) {
+  progressEl.hidden = false;
+  progressFlower.hidden = true;
+  const pct = total > 0 ? Math.min(1, done / total) : 0;
+  barFill.style.width = `${Math.round(pct * 100)}%`;
+  progressLabel.textContent = label || `${done}/${total}`;
+}
+function progressHide() {
+  progressEl.hidden = true;
+  progressFlower.hidden = true;
+  barFill.style.width = '0%';
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
@@ -266,6 +291,7 @@ async function downloadAll() {
 
   try {
     setStatus('Crawling conversation list…');
+    progressSpin('crawling');
     const summaries = await fetchAllSummaries();
     if (!summaries.length) {
       setStatus('No conversations found.', 'warn');
@@ -278,6 +304,7 @@ async function downloadAll() {
       const have = libUpdated.get(c.id);
       return !have || !c.updated || c.updated > have;
     });
+    progressUpdate(0, targets.length, `0/${targets.length}`);
 
     let downloaded = 0;
     let unchanged = summaries.length - targets.length;
@@ -331,6 +358,7 @@ async function downloadAll() {
         console.log(`[convo-hist ${BUILD}] download progress: ${i + 1}/${targets.length}` +
           ` (new ${downloaded}, failed ${failed}, pacing ${pacing}ms)`);
       }
+      progressUpdate(i + 1, targets.length, `${downloaded}/${targets.length}`);
       await sleep(pacing);
     }
 
@@ -348,6 +376,7 @@ async function downloadAll() {
   } catch (e) {
     setStatus(`Download failed: ${e.message}`, 'err');
   } finally {
+    progressHide();
     bulkRunning = false;
     bulkAbort = false;
     downloadBtn.textContent = 'Download';
@@ -403,6 +432,7 @@ async function exportTargets(targets) {
     let failed = 0;
     let consecutiveFails = 0;
     const failures = [];
+    progressUpdate(0, targets.length, `0/${targets.length}`);
 
     for (let i = 0; i < targets.length; i++) {
       if (bulkAbort) break;
@@ -445,6 +475,7 @@ async function exportTargets(targets) {
         }
       }
       await sleep(120);
+      progressUpdate(i + 1, targets.length, `${exported}/${targets.length}`);
     }
 
     const stopped = bulkAbort ? ' (stopped early — run Export again to resume)' : '';
@@ -458,6 +489,7 @@ async function exportTargets(targets) {
   } catch (e) {
     setStatus(`Export failed: ${e.message}`, 'err');
   } finally {
+    progressHide();
     bulkRunning = false;
     bulkAbort = false;
     exportBtn.textContent = prevLabel;
@@ -588,6 +620,7 @@ async function digestMissing() {
         }
       }
       await sleep(300);
+      progressUpdate(i + 1, targets.length, `${done}/${targets.length}`);
     }
 
     const stopped = bulkAbort ? ' (stopped early)' : '';
@@ -602,6 +635,7 @@ async function digestMissing() {
   } catch (e) {
     setStatus(`Digest failed: ${e.message}`, 'err');
   } finally {
+    progressHide();
     bulkRunning = false;
     bulkAbort = false;
     exportBtn.textContent = 'Export';
