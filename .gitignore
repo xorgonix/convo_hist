@@ -12,3 +12,4 @@ browser-tests/*.test
 # OS noise
 Thumbs.db
 desktop.ini
+all-code.txt
