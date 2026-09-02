@@ -70,7 +70,16 @@ func (s *mockState) setTitle(id, title string) {
 func (s *mockState) bumpUpdate(id string, delta int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.updateTime[id] += delta
+	base, ok := s.updateTime[id]
+	if !ok {
+		base = richUpdate(id)
+		if base == 0 {
+			var n int
+			fmt.Sscanf(id, "gen-%d", &n)
+			base = baseG + int64(n)*3600
+		}
+	}
+	s.updateTime[id] = base + delta
 }
 
 func (s *mockState) count(label string) int {

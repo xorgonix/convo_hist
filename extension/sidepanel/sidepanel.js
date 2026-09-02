@@ -11,18 +11,15 @@
 //
 //   EXPORT: selected threads (or all if none selected) -> vault folder as
 //   markdown (frontmatter built from the envelope) and, if configured, a
-//   second output folder as markdown or JSON. (Phase 4 makes this
-//   strictly local-only: no ChatGPT refresh during Export.)
+//   second output folder as markdown or JSON. Export is STRICTLY local:
+//   it renders exactly what is in the Conversarium and never contacts
+//   ChatGPT (R-09). Want fresher content? Run Import first, then Export.
 //
 //   DIGEST: fills summary + tags on library threads in place.
 //
 //   No index files. No JSON in the vault. No extra buttons.
 
-import {
-  normalizeConversationSummary,
-  normalizeConversation
-} from '../lib/vendors/chatgpt.js';
-import { buildEnvelope } from '../lib/envelope.js';
+import { normalizeConversationSummary } from '../lib/vendors/chatgpt.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import {
   getCurrentArchiveHandle, reconnectArchiveHandle, chooseArchiveHandle,
@@ -33,7 +30,7 @@ import {
 } from '../lib/fsaccess.js';
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
-import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
+import { listConversations, onStage, BUILD } from '../lib/transport.js';
 import { loadState, getTourDone, setTourDone } from '../lib/state.js';
 import {
   startNewImport, resumeImport, discardJob, stop as stopImport,
@@ -67,7 +64,7 @@ const loadAllBtn = $('load-all-btn');
 let libraryEnvs = [];      // the Conversarium: every downloaded thread (the list)
 let exportedIds = new Set(); // in the vault (badge)
 let checkedIds = new Set();  // selected for export
-let conversations = [];      // last crawled ChatGPT summaries (staleness checks)
+let conversations = [];      // last crawled ChatGPT summaries (Load more/all browsing only)
 let hasMore = false;
 let nextOffset = 0;
 let loadingList = false;
@@ -215,6 +212,10 @@ function onControllerEvent(evt) {
       break;
     case 'job-changed':
       refreshOpButtons();
+      // A-19: when the import starts on an empty Conversarium, swap the
+      // "empty" notice for "Import is running…" the moment the job exists —
+      // during discovery no thread-saved events arrive to trigger a render.
+      renderCurrentView();
       break;
     case 'done':
       // Final local reconciliation on every exit path (R-05), then
@@ -398,14 +399,6 @@ function escapeHtml(s) {
   );
 }
 
-function authHint(err) {
-  if (err && (err.status === 401 || err.status === 403)) {
-    return ' — open chatgpt.com and make sure you are logged in, then hit ↻';
-  }
-  if (err && err.status === 429) return ' — rate limited, pacing automatically';
-  return '';
-}
-
 async function refreshFolderStatus() {
   const st = await archiveStatus();
   folderLabel.textContent =
@@ -496,7 +489,8 @@ async function loadLibrary() {
   setStatus(`${libraryEnvs.length} threads in the Conversarium.`, 'ok');
 }
 
-// ChatGPT list pages — used by the download crawl and staleness checks only.
+// ChatGPT list pages — manual list browsing only (Load more / Load all).
+// The import controller owns its own reads; Export never touches these.
 async function loadConversations(offset, append) {
   if (loadingList) return true;
   loadingList = true;
@@ -543,7 +537,10 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------------------
-// EXPORT: library -> vault markdown (+ optional second output folder).
+// EXPORT: Conversarium -> vault markdown (+ optional second output folder).
+// R-09: local and predictable — this path performs ZERO ChatGPT requests.
+// Freshness belongs to Import; Export renders the Conversarium exactly
+// as it exists on disk right now.
 
 function exportTrigger() {
   if (importRunning()) {
@@ -590,11 +587,7 @@ async function exportTargets(targets) {
   loadAllBtn.disabled = true;
 
   try {
-    // Staleness check against the live ChatGPT list, when we have one.
-    const listById = new Map(conversations.map((c) => [c.id, c]));
-
     let exported = 0;
-    let refreshed = 0;
     let failed = 0;
     let consecutiveFails = 0;
     const failures = [];
@@ -604,23 +597,7 @@ async function exportTargets(targets) {
       if (abortSig.aborted) break;
       const env = targets[i];
 
-      // Before writing: compare against the current ChatGPT version.
-      const live = listById.get(env.id);
-      if (live && live.updated && env.updated && live.updated > env.updated) {
-        setStatus(`Refreshing ${i + 1}/${targets.length}: ${env.title}`, 'warn');
-        try {
-          const raw = await getConversation(env.id);
-          const fresh = buildEnvelope(normalizeConversation(raw));
-          await writeLibraryThread(fresh);
-          Object.assign(env, fresh); // export the refreshed copy
-          refreshed++;
-        } catch (e) {
-          console.warn(`[convo-hist ${BUILD}] refresh skipped: "${env.title}" — ${e.message}`);
-          // Export what we have; the next run will refresh again.
-        }
-      }
-
-      setStatus(`Exporting ${i + 1}/${targets.length}: ${env.title}`, 'warn');
+      setStatus(`Exporting ${i + 1}/${targets.length}: ${env.title} (local)`, 'warn');
       try {
         const md = renderMarkdown(env);
         await writeArchiveFile(env, md);
@@ -644,12 +621,12 @@ async function exportTargets(targets) {
       progressUpdate(i + 1, targets.length, `Processed ${exported + failed} of ${targets.length} · Saved ${exported} · Failed ${failed}`);
     }
 
-    const stopped = abortSig.aborted ? ' (stopped early — press Stop export again, or resume by running Export)' : '';
+    const stopped = abortSig.aborted ? ' (stopped early — run Export again for the rest)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
     setStatus(
-      `Export done: ${exported} written, ${refreshed} refreshed, ${failed} failed${stopped}${reasonNote}.`,
+      `Export done: ${exported} written, ${failed} failed${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
@@ -666,22 +643,15 @@ async function exportTargets(targets) {
   }
 }
 
-// Single-thread export (double-click a row).
+// Single-thread export (double-click a row). R-09: strictly local — the
+// envelope comes from the Conversarium; ChatGPT is never contacted. If the
+// thread is not in the Conversarium yet, run Import instead of fetching.
 async function capture(chatId) {
   setStatus('Preparing thread…');
-  let env = libraryEnvs.find((x) => x.id === chatId);
-  const live = conversations.find((c) => c.id === chatId);
-  if (!env || (live && live.updated && env.updated && live.updated > env.updated)) {
-    try {
-      const raw = await getConversation(chatId);
-      env = buildEnvelope(normalizeConversation(raw));
-      await writeLibraryThread(env);
-      const i = libraryEnvs.findIndex((x) => x.id === chatId);
-      if (i >= 0) libraryEnvs[i] = env; else libraryEnvs.push(env);
-    } catch (err) {
-      setStatus(`Fetch failed: ${err.message}${authHint(err)}`, 'err');
-      if (!env) return;
-    }
+  const env = libraryEnvs.find((x) => x.id === chatId);
+  if (!env) {
+    setStatus('This thread is not in the Conversarium — run Import first.', 'warn');
+    return;
   }
 
   const vault = await getCurrentArchiveHandle();

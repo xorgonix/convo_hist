@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Convo Hist — Architecture &amp; User Walkthrough</title>
+  <title>Thread-O-matic — Architecture &amp; User Walkthrough</title>
   <link rel="stylesheet" href="https://unpkg.com/reveal.js@5.0.4/dist/reveal.css" />
   <link rel="stylesheet" href="https://unpkg.com/reveal.js@5.0.4/dist/theme/black.css" />
   <style>
@@ -30,9 +30,9 @@
 <div class="slides">
 
 <section class="cover" data-background-color="#101418">
-  <h1>Convo Hist</h1>
+  <h1>Thread-O-matic</h1>
   <p class="sub">A local-first archiver for your ChatGPT conversations</p>
-  <p class="dim small">v0.5.0 — Library flow · Markdown vault · Digest engine</p>
+  <p class="dim small">v0.6.0 — Conversarium flow · checkpointed Import · local-only Export</p>
 </section>
 
 <section>
@@ -71,35 +71,36 @@
   <p class="kicker">The flow</p>
   <h2>Two stages, two folders</h2>
   <pre class="flow">
-STAGE 1 — DOWNLOAD                    STAGE 2 — EXPORT
-ChatGPT ──► LIBRARY folder            LIBRARY ──► VAULT folder
+IMPORT                                EXPORT — strictly local
+ChatGPT ──► CONVERSARIUM folder      CONVERSARIUM ──► VAULT folder
 one JSON per thread                   markdown + frontmatter
 new &amp; changed only                    markdown or JSON to a
-paced · throttled · resumable         second folder (optional)
+checkpointed · resumable              second folder (optional)
   </pre>
-  <p class="small dim">The library is the source of truth. The vault is the reading copy.</p>
+  <p class="small dim">The Conversarium is the source of truth. The vault is the reading copy.
+  Export never contacts ChatGPT — run Import first for freshness.</p>
 </section>
 
 <section>
   <p class="kicker">Stage 1</p>
-  <h2>Download</h2>
+  <h2>Import</h2>
   <ul>
-    <li>Auto-runs when the panel opens; resumable forever</li>
-    <li>Diffs the live ChatGPT list against the library — fetches only new + changed</li>
-    <li>Pacing starts at 400ms; rate governor raises it to 8s when 429s appear</li>
-    <li>Server <code>retry-after</code> is honored exactly</li>
-    <li>Circuit breaker pauses after 3 consecutive failures — press Download to resume</li>
+    <li>Runs only when you press it — opening the panel never contacts ChatGPT</li>
+    <li>Durable checkpoint after every list page and every thread: <b>Resume</b> picks up at the saved offset, and disk-diff heals crash-after-write</li>
+    <li>A dedicated <b>Stop import</b> button cancels immediately, mid-request</li>
+    <li>Server <code>Retry-After</code> (seconds or HTTP-date) is honored and survives panel reload</li>
+    <li>401/403 pause with login guidance; 404 and malformed items are reported, not retried blindly</li>
   </ul>
 </section>
 
 <section>
   <p class="kicker">Stage 1 output</p>
-  <h2>The library folder</h2>
+  <h2>The Conversarium folder</h2>
   <pre>threads/
   Kubernetes Networking Deep Dive (6a113fa5).json
   Sourdough Starter Guide (6a11289e).json
   ...</pre>
-  <p class="small dim">Deterministic names — re-download overwrites in place. Title changes clean up the old file.</p>
+  <p class="small dim">Deterministic names — re-import overwrites in place. Title changes clean up the old file.</p>
 </section>
 
 <section>
@@ -107,9 +108,9 @@ paced · throttled · resumable         second folder (optional)
   <h2>Export</h2>
   <ul>
     <li>Selected threads, or everything when nothing is selected</li>
-    <li><b>Diff-before-export:</b> each library JSON is compared with ChatGPT's live list — stale threads are refreshed first</li>
-    <li>Writes markdown to the vault; optionally markdown/JSON to a second folder</li>
-    <li>Pure local disk writes — instant, no network</li>
+    <li><b>Local only:</b> renders exactly what is in the Conversarium — zero ChatGPT requests, no silent refreshes. Run Import first for freshness</li>
+    <li>Writes markdown to the vault (<code>chats/</code>); optionally markdown/JSON to a second folder</li>
+    <li>Double-click a row to export just that thread — also local-only</li>
   </ul>
 </section>
 
@@ -135,7 +136,7 @@ summary: "..."
 
 <section>
   <p class="kicker">The panel</p>
-  <h2>The list is the library</h2>
+  <h2>The list is the Conversarium</h2>
   <ul>
     <li>A line item means the JSON file exists on disk — nothing else is listed</li>
     <li>Click = select for export · Select all at the top · double-click = export one</li>
@@ -148,20 +149,20 @@ summary: "..."
   <p class="kicker">Settings</p>
   <h2>⚙ Everything configurable</h2>
   <ul>
-    <li><b>Library folder</b> — where downloaded JSONs live</li>
-    <li><b>Vault folder</b> — markdown export destination</li>
+    <li><b>Conversarium</b> — where imported thread JSONs live</li>
+    <li><b>Vault folder</b> — markdown export destination (under <code>chats/</code>)</li>
     <li><b>Second output folder</b> — markdown or JSON</li>
     <li><b>Summarizer</b> — auto / Gemini Nano / Ollama / LM Studio / extractive</li>
     <li><b>Ollama URL + model</b></li>
-    <li><b>Test button</b> per folder — writes a marker file so you can verify the exact location in Explorer</li>
+    <li>Per folder: <b>Change</b> (always opens the picker) · <b>Reconnect</b> · <b>Verify</b> · <b>Forget</b> (drops the handle, never the files)</li>
   </ul>
 </section>
 
 <section>
   <p class="kicker">Honest constraint</p>
-  <h2>Why the "Test" button exists</h2>
+  <h2>Why the "Verify" button exists</h2>
   <p>The File System Access API cannot reveal a granted folder's full path — the browser hides it by design.</p>
-  <p>So Settings writes <code>_convo_hist_here.txt</code> into each configured folder. You look in Explorer and <i>know</i>.</p>
+  <p>So Settings writes <code>_thread_o_matic_here.txt</code> naming the folder's role. You look in Explorer and <i>know</i>.</p>
 </section>
 
 <section>
@@ -180,7 +181,7 @@ summary: "..."
   <ul>
     <li>2–3 sentence <b>summary</b> per thread</li>
     <li>3–7 lowercase <b>tags</b>, normalized</li>
-    <li>Written into the library JSON — then Export refreshes the vault</li>
+    <li>Written into the Conversarium JSON — then Export refreshes the vault</li>
     <li>Search results show tag chips; summaries appear on result cards</li>
   </ul>
 </section>
@@ -214,7 +215,7 @@ assistant: networkpolicy     only assistant replies</pre>
     <li>Reads chatgpt.com using <b>your</b> logged-in session — nothing else on the network</li>
     <li>Writes only the folders you explicitly granted</li>
     <li>No analytics, no accounts, no remote code</li>
-    <li>Browser storage: tiny caches (list, settings) — thread JSON lives in your folders</li>
+    <li>Browser storage: tiny metadata only (settings, import checkpoint — never tokens)</li>
   </ul>
 </section>
 
@@ -223,8 +224,8 @@ assistant: networkpolicy     only assistant replies</pre>
   <h2>A browser-level test suite, not hope</h2>
   <ul>
     <li>Go + Rod: real Chromium, real extension, mocked ChatGPT API</li>
-    <li>26 tests: smoke, journeys, edge cases, fault injection (401, 429, malformed)</li>
-    <li>Local TLS mock server covers panel <i>and</i> service-worker contexts</li>
+    <li>24 acceptance tests (A-01–A-24): no-network-on-open, checkpointed resume, Stop, 429 cooldown survival, local-only Export, title-change cleanup, 390px layout</li>
+    <li>Local TLS mock server covers panel <i>and</i> service-worker contexts; three isolated fake folder roots</li>
     <li>Screenshots, videos, per-test logs on every run</li>
   </ul>
 </section>
@@ -244,9 +245,9 @@ assistant: networkpolicy     only assistant replies</pre>
   <p class="kicker">Install</p>
   <h2>Five minutes</h2>
   <pre>1. chrome://extensions → Developer mode → Load unpacked → extension/
-2. Pin "Convo Hist" → click → side panel opens
-3. ⚙ Settings → set Library + Vault folders → press Test on each
-4. Download runs by itself
+2. Pin "Thread-O-matic" → click → side panel opens
+3. ⚙ Settings → set Conversarium + Vault folders → press Verify on each
+4. Press Import when you want it — it checkpoints and resumes
 5. Export → your vault fills with markdown</pre>
 </section>
 
@@ -254,9 +255,10 @@ assistant: networkpolicy     only assistant replies</pre>
   <p class="kicker">Troubleshooting</p>
   <h2>The status bar tells the truth</h2>
   <table>
-    <tr><td>Download paused (3 in a row)</td><td>rate limits — press Download to resume</td></tr>
-    <tr><td>HTTP 401/403</td><td>log in at chatgpt.com, reload the list</td></tr>
-    <tr><td>library: not set</td><td>⚙ Settings → choose the library folder</td></tr>
+    <tr><td>Import paused (3 failures)</td><td>rate limits — press Resume import</td></tr>
+    <tr><td>HTTP 401/403</td><td>log in at chatgpt.com, then Resume import</td></tr>
+    <tr><td>Conversarium: not set</td><td>⚙ Settings → choose the folder</td></tr>
+    <tr><td>… — access needed</td><td>Reconnect — never deletes anything</td></tr>
     <tr><td>build: loading… stuck</td><td>stale panel — close and reopen</td></tr>
   </table>
 </section>
@@ -264,18 +266,19 @@ assistant: networkpolicy     only assistant replies</pre>
 <section>
   <p class="kicker">Roadmap</p>
   <h2>Where this goes</h2>
+  <p class="small dim">Deliberately deferred past v0.6.0 (spec §11) — extension points are left, placeholder controls are not:</p>
   <ul>
-    <li>Auto-digest on download — no button needed</li>
+    <li>Incremental discovery, scheduled/background imports</li>
+    <li>Auto-digest during Import</li>
     <li>Local Go "brain" service (localhost:8080 slot already reserved)</li>
-    <li>SurrealDB + ontology ingestion of the envelopes</li>
-    <li>Scheduled self-maintaining archive</li>
+    <li>SurrealDB + semantic search; multi-vendor imports; share destinations</li>
   </ul>
 </section>
 
 <section>
   <h1>Own your history.</h1>
   <p class="sub">Files you can open. A search that works. Nothing you don't control.</p>
-  <p class="dim small">USERGUIDE.md · slides/index.html · browser-tests/ · extension/SPECS/deprecated/APPROACH.md</p>
+  <p class="dim small">USERGUIDE.md · slides/index.html · browser-tests/ · extension/SPECS/</p>
 </section>
 
 </div>

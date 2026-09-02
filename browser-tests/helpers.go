@@ -744,6 +744,23 @@ func (s *tb) fsCountIn(prefix, suffix string) int {
 	return n
 }
 
+// once polls fn and delivers its first non-empty result on the returned
+// channel (buffered, one value). Used to capture values that exist only
+// transiently (e.g. a UI status line that a rerender overwrites).
+func (s *tb) once(poll time.Duration, fn func() string) chan string {
+	ch := make(chan string, 1)
+	go func() {
+		for {
+			if v := fn(); v != "" {
+				ch <- v
+				return
+			}
+			time.Sleep(poll)
+		}
+	}()
+	return ch
+}
+
 func (s *tb) fsHas(p string) bool {
 	for _, f := range s.fsFiles() {
 		if f == p {

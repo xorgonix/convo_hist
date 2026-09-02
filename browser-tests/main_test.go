@@ -1,7 +1,6 @@
 // main_test.go — Thread-O-matic v0.6.0 acceptance suite (spec §8).
-// Phase 1 coverage: A-01, A-02, A-13, A-14, A-15, A-19, A-24.
-// Remaining A-cases land with their delivery phases (spec §12).
-// Each test gets a fresh browser + unpacked extension + mocked ChatGPT API.
+// All 24 A-cases (A-01..A-24). Each test gets a fresh browser + unpacked
+// extension + mocked ChatGPT API.
 package e2e
 
 import (
@@ -662,7 +661,22 @@ func TestA04_FirstTitleAppearsLive(t *testing.T) {
 	s.state.convDelay["gen-001"] = 6 * time.Second
 
 	s.page.MustElement("#capture-btn").MustClick()
-	s.waitItems(1, 15*time.Second) // first .chat-item rendered
+	// At fast e2e pacing several threads can land inside one throttled render
+	// (50ms apart vs the 250ms render budget), so the first observable row
+	// count may jump straight past 1. The requirement is "a title appears
+	// mid-import": poll for ≥1 rows while the checkpoint is not yet done.
+	deadline := time.Now().Add(15 * time.Second)
+	seen := false
+	for time.Now().Before(deadline) && !seen {
+		if s.count(".chat-item") >= 1 && !strings.Contains(s.checkpointJSON(), `"state":"completed"`) {
+			seen = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !seen {
+		s.failf("first title never appeared before import completed; status=%q", s.text("#status"))
+	}
 	s.waitCheckpoint(`"state":"importing"`, 5*time.Second)
 	body := s.text("#chat-list")
 	if !strings.Contains(body, "Kubernetes Networking Deep Dive") {
@@ -859,6 +873,268 @@ func TestA23_NarrowViewport(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4 — local-only Export and regression closure (A-16..A-18, A-21, A-22).
+//
+// waitCheckpointAll polls until the checkpoint summary contains EVERY substr
+// (needed for "completed AND saved=1" on a second run, where the old job
+// already satisfied any single substring).
+
+func (s *tb) waitCheckpointAll(substrs []string, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		cur := s.checkpointJSON()
+		ok := true
+		for _, sub := range substrs {
+			if !strings.Contains(cur, sub) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			s.logf("checkpoint reached: %s", cur)
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	s.failf("timeout waiting for checkpoint containing %v; last=%s", substrs, s.checkpointJSON())
+}
+
+// plantLocalThread writes a Conversarium JSON directly into the fake fs, as
+// if the user had added the file by hand. Returns nothing; the panel only
+// learns about it via Reload Conversarium (which is the point).
+func (s *tb) plantLocalThread(id, title, summary string) {
+	s.t.Helper()
+	env := map[string]any{
+		"id": id, "title": title,
+		"created": "2026-09-01T00:00:00.000Z", "updated": "2026-09-01T00:00:00.000Z",
+		"summary": summary, "tags": []string{"planted"},
+		"turns": []map[string]any{
+			{"role": "user", "text": "Locally planted thread — never seen by ChatGPT.",
+				"timestamp": "2026-09-01T00:00:00.000Z"},
+		},
+	}
+	raw, _ := json.Marshal(env)
+	out := s.page.MustEval(`async (json) => {
+      const h = await showDirectoryPicker({ mode: 'readwrite', id: 'convo-library' });
+      const dir = await h.getDirectoryHandle('threads', { create: true });
+      const env = JSON.parse(json);
+      const fh = await dir.getFileHandle(env.title + '.json', { create: true });
+      const w = await fh.createWritable();
+      await w.write(JSON.stringify(env, null, 2));
+      await w.close();
+      return 'ok';
+    }`, string(raw))
+	if out.Str() != "ok" {
+		s.failf("planting local thread failed: %s", out.Str())
+	}
+	s.logf("planted local thread %q into the fake Conversarium", title)
+}
+
+// A-16 — Export makes zero ChatGPT requests and renders exactly the local
+// JSON version (a planted local-only thread is exported verbatim).
+
+func TestA16_ExportIsLocalOnly(t *testing.T) {
+	s := startTest(t, "A-16", "Export: zero ChatGPT requests, renders local JSON", "A-case", withTotal(3))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+
+	baseline := s.state.totalHits()
+	s.plantLocalThread("manual-1", "Locally Planted Thread", "LOCAL-ONLY-MARKER 7f3a9b")
+	s.page.MustElement("#reload-btn").MustClick()
+	s.waitText("#chat-list", "Locally Planted Thread", 8*time.Second)
+
+	s.grantFolder()
+	s.page.MustElement("#capture-all-btn").MustClick() // Export (nothing selected → all 4)
+	s.waitStatus("Export done", "ok", 20*time.Second)
+
+	if n := s.state.totalHits(); n != baseline {
+		s.failf("Export made %d ChatGPT request(s) (baseline %d) — R-09 violated", n-baseline, baseline)
+	}
+	files := s.fsFilesIn("convo-archive")
+	if len(files) != 4 {
+		s.failf("expected 4 exported vault files, got %v", files)
+	}
+	for _, f := range files {
+		if !strings.HasPrefix(f, "chats/") || !strings.HasSuffix(f, ".md") {
+			s.failf("unexpected vault path %q", f)
+		}
+	}
+	// The planted thread's markdown must be rendered from the LOCAL envelope:
+	md := s.page.MustEval(`(p, r) => window.__e2eFsFileText(p, r)`,
+		"chats/Locally Planted Thread (manual1).md", "convo-archive").Str()
+	if !strings.Contains(md, "LOCAL-ONLY-MARKER 7f3a9b") {
+		s.failf("vault markdown does not carry the local envelope; got: %q", md)
+	}
+	s.logf("export wrote 4 local renders, incl. the planted thread, with zero ChatGPT requests")
+	s.evidence("A-16-export-local.png")
+}
+
+// A-17 — Double-click export makes zero ChatGPT requests.
+
+func TestA17_DoubleClickExportIsLocal(t *testing.T) {
+	s := startTest(t, "A-17", "Double-click export: zero ChatGPT requests", "A-case", withTotal(3))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitItems(3, 8*time.Second)
+
+	baseline := s.state.totalHits()
+	s.grantFolder()
+	s.dblclickRow(0)
+	s.waitStatus("Exported", "ok", 10*time.Second)
+
+	if n := s.state.totalHits(); n != baseline {
+		s.failf("double-click export made %d ChatGPT request(s) (baseline %d)", n-baseline, baseline)
+	}
+	if files := s.fsFilesIn("convo-archive"); len(files) != 1 || !strings.HasSuffix(files[0], ".md") {
+		s.failf("expected exactly one exported .md, got %v", files)
+	}
+	s.logf("row double-click exported the local thread; ChatGPT untouched")
+	s.evidence("A-17-dblclick-local.png")
+}
+
+// A-18 — Reload Conversarium makes zero ChatGPT requests and discovers
+// manually added local JSON.
+
+func TestA18_ReloadDiscoversLocalFiles(t *testing.T) {
+	s := startTest(t, "A-18", "Reload Conversarium: local-only, finds manual JSON", "A-case", withTotal(3))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitItems(3, 8*time.Second)
+
+	baseline := s.state.totalHits()
+	s.plantLocalThread("manual-1", "Dropped In By Hand", "anything")
+	s.page.MustElement("#reload-btn").MustClick() // Reload Conversarium
+	s.waitText("#chat-list", "Dropped In By Hand", 8*time.Second)
+	s.waitStatus("4 threads in the Conversarium", "ok", 4*time.Second)
+
+	if n := s.state.totalHits(); n != baseline {
+		s.failf("Reload Conversarium made %d ChatGPT request(s) (baseline %d)", n-baseline, baseline)
+	}
+	files := s.fsFilesIn("convo-library")
+	if len(files) != 4 {
+		s.failf("expected 4 Conversarium files, got %v", files)
+	}
+	s.logf("reload found the manually added file with zero ChatGPT requests")
+	s.evidence("A-18-reload-local.png")
+}
+
+// A-21 — Digest updates Conversarium JSON; a subsequent Export emits the
+// updated summary/tags in the vault markdown.
+
+func TestA21_DigestThenExport(t *testing.T) {
+	s := startTest(t, "A-21", "Digest updates JSON, Export carries summary/tags", "A-case", withTotal(2))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.grantFolder()
+
+	// Capture the timestamped Conversarium JSON the moment the digest lands
+	// (a later write would not change the assertion, but capturing at digest
+	// time proves the pipeline ordering).
+	const threadJSONPath = "threads/Kubernetes Networking Deep Dive (conva).json"
+	chJSON := s.once(150*time.Millisecond, func() string {
+		return s.page.MustEval(`(p, r) => {
+          const t = window.__e2eFsFileText(p, r);
+          return (t && JSON.parse(t).summary) ? t : "";
+        }`, threadJSONPath, "convo-library").Str()
+	})
+
+	s.page.MustElement("#digest-btn").MustClick()
+	s.waitStatus("Digest done", "ok", 30*time.Second)
+
+	var digestedJSON string
+	select {
+	case digestedJSON = <-chJSON:
+	case <-time.After(15 * time.Second):
+		s.failf("digested Conversarium JSON never appeared at %s", threadJSONPath)
+	}
+	var env struct {
+		Summary string   `json:"summary"`
+		Tags    []string `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(digestedJSON), &env); err != nil {
+		s.failf("Conversarium JSON unreadable after digest: %v", err)
+	}
+	if env.Summary == "" || len(env.Tags) == 0 {
+		s.failf("digest wrote no summary/tags: summary=%q tags=%v", env.Summary, env.Tags)
+	}
+
+	baseline := s.state.totalHits()
+	s.page.MustElement("#capture-all-btn").MustClick() // Export all
+	s.waitStatus("Export done", "ok", 15*time.Second)
+
+	md := s.page.MustEval(`(p, r) => window.__e2eFsFileText(p, r)`,
+		"chats/Kubernetes Networking Deep Dive (conva).md", "convo-archive").Str()
+	if !strings.Contains(md, env.Summary) {
+		s.failf("vault markdown is missing the digest summary %q", env.Summary)
+	}
+	if !strings.Contains(md, env.Tags[0]) {
+		s.failf("vault markdown is missing digest tag %q", env.Tags[0])
+	}
+	if n := s.state.totalHits(); n != baseline {
+		s.failf("Digest/Export made %d ChatGPT request(s) (baseline %d)", n-baseline, baseline)
+	}
+	s.logf("digest summary + %d tags flowed into the vault markdown locally", len(env.Tags))
+	s.evidence("A-21-digest-export.png")
+}
+
+// A-22 — A title change writes the new JSON and removes the old same-ID
+// filename without touching unrelated files.
+
+func TestA22_TitleChangeCleanup(t *testing.T) {
+	s := startTest(t, "A-22", "Title change: new file written, old removed, others intact", "A-case", withTotal(3))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	before := s.fsFilesIn("convo-library")
+	if len(before) != 3 {
+		s.failf("expected 3 Conversarium files, got %v", before)
+	}
+
+	// ChatGPT renames the thread and bumps update_time; the next import must
+	// refetch and rewrite it under the new title.
+	s.state.setTitle("conv-a", "Renamed Networking Deep Dive")
+	s.state.bumpUpdate("conv-a", 3600)
+
+	s.page.MustElement("#capture-btn").MustClick() // fresh import (job completed)
+	s.waitCheckpointAll([]string{`"state":"completed"`, `"saved":1`, `"unchanged":2`}, 30*time.Second)
+
+	if n := s.state.count("conv:conv-a"); n != 2 {
+		s.failf("conv-a fetched %d times; want 2 (original + rename refetch)", n)
+	}
+	files := s.fsFilesIn("convo-library")
+	if len(files) != 3 {
+		s.failf("expected still exactly 3 files after rename, got %v", files)
+	}
+	joined := strings.Join(files, "\n")
+	if !strings.Contains(joined, "threads/Renamed Networking Deep Dive (conva).json") {
+		s.failf("new-titled file missing: %v", files)
+	}
+	if strings.Contains(joined, "threads/Kubernetes Networking Deep Dive (conva).json") {
+		s.failf("stale same-id filename survived: %v", files)
+	}
+	for _, keep := range []string{
+		"threads/Sourdough Starter Guide (convb).json",
+		"threads/Go Context Cancellation (convc).json",
+	} {
+		if !strings.Contains(joined, keep) {
+			s.failf("unrelated file %q was touched: %v", keep, files)
+		}
+	}
+	s.logf("rename cleanup verified: %v", files)
+	s.evidence("A-22-title-cleanup.png")
+}
+
+// ---------------------------------------------------------------------------
 // results.json + report.md
 
 func writeResultsAndReport(exitCode int) {
@@ -939,17 +1215,18 @@ func writeResultsAndReport(exitCode int) {
 	fmt.Fprintf(&b, `
 ## Scope of this run
 
-Phase 1 acceptance coverage (spec §8): A-01 (no network on open), A-02
-(brand sweep), A-13 (change-folder opens picker, cancel preserves), A-14
-(reconnect/forget), A-15 (distinct folder roots), A-19 (distinct empty/
-permission/no-hit states), A-24 (version coherence).
+Full v0.6.0 automated acceptance coverage (spec §8): all 24 A-cases —
+A-01/A-02 (no network on open, brand), A-03..A-12 (checkpointed import,
+stop/resume, disk-diff heal, 401/429/malformed/404 handling), A-04/A-05/
+A-20/A-23 (live UI, unified progress, search persistence, 390px layout),
+A-13..A-15 (folder choose/change/reconnect/forget, root isolation),
+A-16..A-18 (Export, double-click export, and Reload Conversarium are
+provably local-only), A-19 (distinct states), A-21 (Digest → Export flow),
+A-22 (title-change cleanup), A-24 (version coherence).
 
-Remaining acceptance cases (A-03..A-12 import/resume, A-04/A-05/A-20/A-23
-live UI, A-16..A-18/A-21/A-22 local export) are delivered with their phases
-per spec §12, as are the manual real-browser checks (native pickers, real
-disk bytes, Chrome restart resume, Obsidian rendering, local digest
-backends). This run is an intermediate development checkpoint, NOT a
-release build.
+The manual real-browser checks in spec §8 (native pickers, real disk bytes,
+Chrome-restart resume, Obsidian rendering, local digest backends) are
+deliberately NOT covered by this mocked run and must be recorded separately.
 `)
 	os.WriteFile(filepath.Join(artifactsDir, "report.md"), []byte(b.String()), 0o644)
 

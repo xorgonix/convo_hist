@@ -26,10 +26,48 @@ import { loadCheckpoint, mutateCheckpoint, clearCheckpoint } from './import-stat
 
 const BATCH = 50;
 const MAX_PAGES = 200;              // R-04: safety limit pauses with a diagnostic
-const BASE_DELAY_MS = 400;
-const MAX_DELAY_MS = 8000;
+// Base spacing between requests. Raised from 400ms after real-account runs
+// showed repeated 429s at that cadence — a second+ here keeps ChatGPT calm.
+// (The e2e panel runs use a short delay so the suite stays fast; the mock
+// server never rate-limits anyway.)
+const BASE_DELAY_MS =
+  (typeof location !== 'undefined' && new URLSearchParams(location.search).has('e2e'))
+    ? 50 : 1400;
+const MAX_DELAY_MS = 12000;
 const MAX_CONSECUTIVE_429 = 5;      // pause after this many back-to-back 429s
 const MAX_TRANSIENT_ATTEMPTS = 3;   // bounded retries per item (R-08)
+
+// Auto-resume after a rate-limit pause (requested behavior): the pause exists
+// only to let the 429 window pass, so waiting politely and retrying ourselves
+// is the expected continuation. Escalating delay, capped attempts; auth
+// pauses, safety-limit pauses and user stops never auto-resume.
+// Panel-session-only: if the panel closes, the timer dies and Resume import
+// remains the path (checkpoint is intact either way).
+const AUTO_RESUME_MAX = 5;
+const AUTO_RESUME_BASE_MS = 60_000;
+const AUTO_RESUME_MAX_MS = 10 * 60_000;
+let autoResumeAttempts = 0;
+let autoResumeTimer = null;
+
+function scheduleAutoResume() {
+  if (autoResumeAttempts >= AUTO_RESUME_MAX) {
+    status(
+      'Import paused: repeated rate limiting, and the auto-resume budget is used up. ' +
+        'Wait a while, then press Resume import.',
+      'err');
+    return;
+  }
+  const delayMs = Math.min(AUTO_RESUME_BASE_MS * 2 ** autoResumeAttempts, AUTO_RESUME_MAX_MS);
+  autoResumeAttempts++;
+  status(
+    `Import paused: rate limited — auto-resuming in ~${Math.max(1, Math.round(delayMs / 60000))} min ` +
+      '(press Resume import to go immediately).',
+    'warn');
+  clearTimeout(autoResumeTimer);
+  autoResumeTimer = setTimeout(() => {
+    if (!running) resumeImport();
+  }, delayMs);
+}
 
 let running = false;
 let abortCtrl = null;
@@ -301,7 +339,11 @@ async function importDetails(cp, signal) {
         emit({ type: 'thread-saved', env });
         cp.importJob.attemptedIds.push(id);
         cp.importJob.counters.saved++;
-        cp.importJob.pacing.delayMs = BASE_DELAY_MS; // success cools pacing back down
+        // Success cools pacing down SLOWLY (AIMD-style decay): the old
+        // "reset to base on first success" slammed back to full speed after
+        // every 429 and immediately invited the next one. 15% decay per
+        // success converges to base only after ~20 smooth fetches.
+        cp.importJob.pacing.delayMs = Math.max(BASE_DELAY_MS, Math.round(cp.importJob.pacing.delayMs * 0.85));
         cp.importJob.pacing.consecutiveTransientFailures = 0;
         cp.importJob.pacing.nextAllowedAt = null;
         outcome = 'saved';
@@ -489,6 +531,8 @@ async function runJob({ fresh }) {
     };
     status(summary.text, summary.kind);
     emit({ type: 'done', summary });
+    // Full completion: the account is calm again — clear the auto-resume debt.
+    autoResumeAttempts = 0;
   } catch (e) {
     if (e.category === 'aborted' || signal.aborted) {
       stoppedCleanly = true;
@@ -507,7 +551,11 @@ async function runJob({ fresh }) {
       };
       status(summary.text, summary.kind);
       emit({ type: 'done', summary });
-    } else if (!(e instanceof PausedError)) {
+    } else if (e instanceof PausedError) {
+      // Rate-limit pauses auto-resume (escalating backoff); everything else
+      // (auth, safety limit, account change) waits for the user on purpose.
+      if (e.reason === 'rate-limit') scheduleAutoResume();
+    } else {
       // Unexpected exception: preserve the checkpoint and reconcile (R-05).
       const cp = await loadCheckpoint();
       await mutateCheckpoint((st) => {
