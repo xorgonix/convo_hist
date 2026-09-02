@@ -361,6 +361,296 @@ func TestA24_VersionCoherence(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// A-03 — Initial Import discovers all pages, imports missing threads, and
+// writes only Conversarium JSON.
+
+func TestA03_InitialImport(t *testing.T) {
+	s := startTest(t, "A-03", "Fresh import: discover + write Conversarium JSON only", "A-case", withTotal(8))
+	s.waitStamp()
+
+	s.page.MustElement("#capture-btn").MustClick() // Import (fresh)
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitCheckpoint(`"saved":8`, 5*time.Second)
+
+	files := s.fsFilesIn("convo-library")
+	if len(files) != 8 {
+		s.failf("expected 8 thread JSONs in the Conversarium, got %d: %v", len(files), files)
+	}
+	for _, f := range files {
+		if !strings.HasPrefix(f, "threads/") || !strings.HasSuffix(f, ".json") {
+			s.failf("unexpected Conversarium path %q", f)
+		}
+	}
+	for _, f := range s.fsFiles() {
+		if strings.HasPrefix(f, "chats/") {
+			s.failf("import wrote outside the Conversarium: %q", f)
+		}
+	}
+	if roots := s.fsRoots(); len(roots) != 1 || roots[0] != "convo-library" {
+		s.failf("import touched unexpected roots: %v", roots)
+	}
+	s.waitCheckpoint(`"state":"completed"`, 5*time.Second)
+	s.logf("import wrote 8 threads/%s JSONs into convo-library only", "")
+	s.evidence("A-03-imported.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-06 — Stop is usable during the first delayed list request and no later
+// request starts.
+
+func TestA06_StopDuringFirstListRequest(t *testing.T) {
+	s := startTest(t, "A-06", "Stop works during discovery; no request after stop", "A-case",
+		withTotal(120))
+	s.waitStamp()
+	s.state.setListDelay(2 * time.Second)
+
+	s.page.MustElement("#capture-btn").MustClick()
+	// Poll for the first list request (session/token + picker precede it).
+	deadline := time.Now().Add(6 * time.Second)
+	for s.state.count("list") == 0 {
+		if time.Now().After(deadline) {
+			s.failf("first list request never started")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if s.hasAttr("#stop-btn", "hidden") {
+		s.failf("Stop import not visible during discovery (R-07)")
+	}
+
+	s.page.MustElement("#stop-btn").MustClick()
+	s.waitCheckpoint(`"state":"stopped"`, 8*time.Second)
+
+	// No later request starts after the abort settles.
+	time.Sleep(1200 * time.Millisecond)
+	if n := s.state.count("list"); n != 1 {
+		s.failf("requests continued after Stop: %d list calls", n)
+	}
+	if label := s.text("#capture-btn"); !strings.Contains(label, "Resume import") {
+		s.failf("primary button reads %q, want Resume import", label)
+	}
+	s.logf("stopped during first list request; zero further requests; resume offered")
+	s.evidence("A-06-stopped-during-discovery.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-07 — Resume during discovery starts at the saved nextOffset; earlier
+// pages are not re-requested.
+
+func TestA07_ResumeDiscoveryAtOffset(t *testing.T) {
+	s := startTest(t, "A-07", "Resume discovery continues at saved offset", "A-case",
+		withTotal(60))
+	s.waitStamp()
+	s.state.setListDelay(1200 * time.Millisecond)
+
+	s.page.MustElement("#capture-btn").MustClick()
+	// Wait until page 1 (offset 0..50) is checkpointed.
+	s.waitCheckpoint(`"nextOffset":50`, 15*time.Second)
+	// Stop while page 2 is in flight (or before it starts).
+	s.page.MustElement("#stop-btn").MustClick()
+	s.waitCheckpoint(`"state":"stopped"`, 8*time.Second)
+
+	listAtStop := s.state.count("list")
+	if listAtStop != 1 && listAtStop != 2 {
+		s.failf("unexpected list count at stop: %d", listAtStop)
+	}
+
+	// Resume: discovery continues at offset 50 — page 1 is never re-requested.
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 60*time.Second)
+
+	want := listAtStop + 1 // only the interrupted page is requested again
+	if n := s.state.count("list"); n != want {
+		s.failf("list requests after resume = %d, want %d (earlier pages must not be re-requested)", n, want)
+	}
+	s.waitCheckpoint(`"saved":60`, 5*time.Second)
+	s.logf("resume continued discovery at saved offset; %d list requests total; 60 threads saved", want)
+	s.evidence("A-07-resumed-discovery.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-08 — Resume during detail import makes no list request and does not
+// refetch files already written.
+
+func TestA08_ResumeDetailsNoList(t *testing.T) {
+	s := startTest(t, "A-08", "Resume detail import: no list call, no refetch", "A-case", withTotal(3))
+	s.waitStamp()
+	s.state.convDelay["conv-b"] = 1500 * time.Millisecond
+
+	s.page.MustElement("#capture-btn").MustClick()
+	// conv-a saved; conv-b in flight.
+	s.waitCheckpoint(`"attempted":1`, 20*time.Second)
+	s.page.MustElement("#stop-btn").MustClick()
+	s.waitCheckpoint(`"state":"stopped"`, 8*time.Second)
+
+	if n := s.state.count("conv:conv-c"); n != 0 {
+		s.failf("conv-c was fetched before stop finished the run order: %d", n)
+	}
+
+	s.page.MustElement("#capture-btn").MustClick() // Resume import
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitCheckpoint(`"saved":3`, 5*time.Second)
+
+	if n := s.state.count("list"); n != 1 {
+		s.failf("resume made %d list request(s); completed discovery must not re-crawl", n)
+	}
+	if n := s.state.count("conv:conv-a"); n != 1 {
+		s.failf("conv-a fetched %d times; saved threads must not be refetched", n)
+	}
+	s.logf("resume skipped discovery and already-saved threads; conv-c fetched once")
+	s.evidence("A-08-resumed-details.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-09 — A crash after disk write but before checkpoint update is healed by
+// the disk diff: the written thread is not fetched again.
+
+func TestA09_CrashHealedByDiskDiff(t *testing.T) {
+	s := startTest(t, "A-09", "Disk diff heals crash-after-write", "A-case", withTotal(3))
+	s.waitStamp()
+
+	// Simulate the crash state: conv-a's file is already on disk (newer than
+	// the fixture timestamp), but the checkpoint still lists it as a target.
+	summaries := `[` +
+		`{"id":"conv-a","title":"Kubernetes Networking Deep Dive","created":"2026-08-20T00:00:00.000Z","updated":"2026-08-20T10:00:00.000Z"},` +
+		`{"id":"conv-b","title":"Sourdough Starter Guide","created":"2026-08-22T00:00:00.000Z","updated":"2026-08-22T18:00:00.000Z"},` +
+		`{"id":"conv-c","title":"Go Context Cancellation","created":"2026-08-24T00:00:00.000Z","updated":"2026-08-24T12:00:00.000Z"}]`
+	out := s.page.MustEval(`async (summaries) => {
+      const m = await import(chrome.runtime.getURL('lib/import-state.js'));
+      const fs = await import(chrome.runtime.getURL('lib/fsaccess.js'));
+      await fs.chooseLibraryHandle(); // e2e picker: in-memory root
+      // The thread written just before the "crash" — newer than the fixture.
+      await fs.writeLibraryThread({ id: 'conv-a', title: 'Kubernetes Networking Deep Dive',
+        created: '2026-08-20T00:00:00.000Z', updated: '2099-01-01T00:00:00.000Z' });
+      await m.mutateCheckpoint((cp) => {
+        cp.chatgptList.items = JSON.parse(summaries);
+        cp.chatgptList.expectedTotal = 3;
+        cp.chatgptList.nextOffset = 150;
+        cp.chatgptList.complete = true;
+        cp.chatgptList.startedAt = '2026-09-02T00:00:00.000Z';
+        cp.importJob.jobId = 'job-crash-test';
+        cp.importJob.state = 'importing';
+        cp.importJob.targetIds = ['conv-a', 'conv-b', 'conv-c'];
+        cp.importJob.attemptedIds = [];
+      });
+      return 'ok';
+    }`, summaries)
+	if out.Str() != "ok" {
+		s.failf("checkpoint seeding failed: %s", out.Str())
+	}
+
+	s.page.MustElement("#capture-btn").MustClick() // Resume import
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+
+	if n := s.state.count("conv:conv-a"); n != 0 {
+		s.failf("conv-a was refetched %d time(s); the disk diff must heal crash-after-write", n)
+	}
+	s.waitCheckpoint(`"unchanged":1`, 5*time.Second)
+	s.waitCheckpoint(`"saved":2`, 5*time.Second)
+	s.logf("crash-written conv-a recognized on disk (unchanged); only conv-b/c fetched")
+	s.evidence("A-09-healed.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-10 — 429 pacing/cooldown survives panel reload; Resume does not reset
+// immediately to 400 ms.
+
+func TestA10_RateLimitCooldownSurvivesReload(t *testing.T) {
+	s := startTest(t, "A-10", "429 cooldown persists across reload", "A-case", withTotal(3))
+	s.waitStamp()
+	s.state.armList429("5") // first list call: 429 + Retry-After: 5
+
+	s.page.MustElement("#capture-btn").MustClick()
+	// Wait until the Retry-After-derived cooldown (>= ~4s remaining of the
+	// 5s Retry-After) is durably persisted — not just any pacing timestamp.
+	s.waitCooldownAtLeast(4000, 10*time.Second)
+	s.logf("429 received; Retry-After cooldown checkpointed")
+
+	// Reload the panel mid-cooldown (real chrome.storage.local persists).
+	s.page.MustNavigate(fmt.Sprintf("chrome-extension://%s/%s?e2e=1", s.extID, panelPath))
+	_ = s.page.WaitLoad()
+	s.page.WaitStable(300 * time.Millisecond)
+	s.waitStamp()
+	if label := s.text("#capture-btn"); !strings.Contains(label, "Resume import") {
+		s.failf("after reload the primary button reads %q, want Resume import", label)
+	}
+
+	resumeAt := time.Now()
+	listBaseline := s.state.count("list") // includes the 429'd first request
+	s.page.MustElement("#capture-btn").MustClick()
+	// No immediate reset to 400 ms: the persisted cooldown must hold.
+	time.Sleep(1200 * time.Millisecond)
+	if n := s.state.count("list"); n != listBaseline {
+		s.failf("list request fired %.1fs after resume — persisted cooldown was ignored",
+			time.Since(resumeAt).Seconds())
+	}
+	// The list call lands once the (persisted) cooldown elapses.
+	deadline := time.Now().Add(8 * time.Second)
+	for s.state.count("list") == listBaseline {
+		if time.Now().After(deadline) {
+			s.failf("list request never resumed after cooldown")
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	s.logf("cooldown honored across reload: list resumed %.1fs after resume click",
+		time.Since(resumeAt).Seconds())
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitCheckpoint(`"saved":3`, 5*time.Second)
+	s.evidence("A-10-cooldown.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-11 — 401/403 pauses with login guidance and preserves the job.
+
+func TestA11_AuthPausePreservesJob(t *testing.T) {
+	s := startTest(t, "A-11", "401 pauses with guidance; job preserved", "A-case", withTotal(3))
+	s.waitStamp()
+	s.state.listStatus = 401
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitStatus("Import paused", "err", 15*time.Second)
+	s.waitCheckpoint(`"state":"paused"`, 5*time.Second)
+	s.waitCheckpoint(`"pauseReason":"auth"`, 2*time.Second)
+
+	if n := s.state.count("list"); n != 1 {
+		s.failf("auth pause should not retry: %d list requests", n)
+	}
+	if label := s.text("#capture-btn"); !strings.Contains(label, "Resume import") {
+		s.failf("primary button reads %q, want Resume import (job preserved)", label)
+	}
+	s.logf("401 paused the job with login guidance; checkpoint retained")
+	s.evidence("A-11-auth-pause.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-12 — Malformed/404 items are reported specifically and do not erase
+// successful work.
+
+func TestA12_MalformedAnd404Reported(t *testing.T) {
+	s := startTest(t, "A-12", "404 + malformed reported; successes kept", "A-case", withTotal(3))
+	s.waitStamp()
+	s.state.malformedFor = "conv-b"
+	s.state.setNotFoundFor("conv-c")
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	s.waitCheckpoint(`"saved":1`, 5*time.Second)
+	s.waitCheckpoint(`"failed":2`, 5*time.Second)
+	s.waitCheckpoint(`"failures":2`, 5*time.Second)
+
+	files := s.fsFilesIn("convo-library")
+	if len(files) != 1 || !strings.Contains(files[0], "conv") {
+		s.failf("expected only conv-a's file in the Conversarium, got %v", files)
+	}
+	// The summary must survive the reconciliation overwrite (done-event).
+	s.waitStatus("Import done", "warn", 8*time.Second)
+	if body := s.text("#status"); !strings.Contains(body, "1 new") || !strings.Contains(body, "2 failed") {
+		s.failf("final summary %q does not report 1 new / 2 failed", body)
+	}
+	s.logf("404 and malformed recorded as specific failures; conv-a saved")
+	s.evidence("A-12-failures-reported.png")
+}
+
+// ---------------------------------------------------------------------------
 // results.json + report.md
 
 func writeResultsAndReport(exitCode int) {

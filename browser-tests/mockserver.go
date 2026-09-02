@@ -57,17 +57,14 @@ func startMockServer() (int, error) {
 	mux.HandleFunc("/backend-api/conversations", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		state := currentState()
-		state.hit("list")
-		state.mu.Lock()
-		status := state.listStatus
-		state.mu.Unlock()
-		code := 200
-		if status != 0 {
-			code = status
-		}
+		state.hit("list") // counted once per request (A-01/A-06/A-07 assertions)
+		code, retryAfter, body := state.respondList(atoiDefault(q.Get("offset"), 0), atoiDefault(q.Get("limit"), 50))
 		w.Header().Set("Content-Type", "application/json")
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
 		w.WriteHeader(code)
-		fmt.Fprint(w, state.respondList(atoiDefault(q.Get("offset"), 0), atoiDefault(q.Get("limit"), 50)))
+		fmt.Fprint(w, body)
 	})
 	mux.HandleFunc("/backend-api/conversation/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]

@@ -35,6 +35,10 @@ import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, getConversation, onStage, BUILD } from '../lib/transport.js';
 import { loadState, getTourDone, setTourDone } from '../lib/state.js';
+import {
+  startNewImport, resumeImport, discardJob, stop as stopImport,
+  isRunning as importRunning, hasResumable as importResumable, setEmitter,
+} from '../lib/import-controller.js';
 import { digestTurns } from '../lib/summarize.js';
 
 const BATCH = 50;
@@ -54,6 +58,8 @@ const settingsBtn = $('settings-btn');
 const libraryHint = $('library-hint');
 const reloadBtn = $('reload-btn');
 const digestBtn = $('digest-btn');
+const stopBtn = $('stop-btn');
+const newImportBtn = $('new-import-btn');
 const selAllEl = $('sel-all');
 const selCountEl = $('sel-count');
 const loadAllBtn = $('load-all-btn');
@@ -84,9 +90,18 @@ async function init() {
     if (bulkRunning) console.log(`[convo-hist ${BUILD}] ${msg}`);
     else setStatus(msg);
   });
+  setEmitter(onControllerEvent);
   setStatus(`Ready — build ${BUILD}`);
 
-  downloadBtn.addEventListener('click', downloadAll);
+  downloadBtn.addEventListener('click', importClicked);
+  stopBtn.addEventListener('click', () => stopImport());
+  newImportBtn.addEventListener('click', async () => {
+    if (importRunning()) return;
+    if (!confirm('Discard the unfinished import checkpoint and start a fresh scan? Imported threads are kept.')) return;
+    await discardJob();
+    setStatus('Previous import discarded (no files deleted).');
+    importClicked();
+  });
   exportBtn.addEventListener('click', exportTrigger);
   settingsBtn.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') }));
   $('help-btn').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('help/help.html') }));
@@ -144,12 +159,83 @@ async function init() {
   await refreshFolderStatus();
   await refreshLibraryStatus();
   await loadLibrary();
+  await refreshImportButtons();
 
   // First-run coach: shown once, skippable, never again.
   if (!isE2e() && !(await getTourDone())) showCoach();
 
   // R-01: the panel NEVER contacts ChatGPT on open. Import runs only when
   // the user presses Import (or Resume import, once Phase 2 lands).
+}
+
+// ---------------------------------------------------------------------------
+// IMPORT — the controller owns the job; the panel renders its events.
+
+function onControllerEvent(evt) {
+  switch (evt.type) {
+    case 'status':
+      setStatus(evt.text, evt.kind);
+      break;
+    case 'spin':
+      progressSpin(evt.label);
+      break;
+    case 'progress':
+      progressUpdate(evt.done, evt.total, evt.label);
+      break;
+    case 'progress-hide':
+      progressHide();
+      break;
+    case 'job-changed':
+      refreshImportButtons();
+      break;
+    case 'done':
+      // Final local reconciliation on every exit path (R-05), then
+      // re-assert the job summary (loadLibrary's count line must not
+      // bury the result the user needs to see).
+      refreshImportButtons();
+      loadLibrary().then(() => {
+        if (evt.summary) setStatus(evt.summary.text, evt.summary.kind);
+      });
+      break;
+    default:
+      break;
+  }
+}
+
+async function refreshImportButtons() {
+  const running = importRunning();
+  const resumable = running ? false : await importResumable();
+  downloadBtn.textContent = running ? '⤓ …' : (resumable ? 'Resume import' : 'Import');
+  downloadBtn.disabled = running;
+  stopBtn.hidden = !running;
+  newImportBtn.hidden = !(resumable && !running);
+  if (running) {
+    moreBtn.hidden = true;
+    digestBtn.disabled = true;
+  }
+}
+
+async function importClicked() {
+  if (importRunning() || bulkRunning) return;
+  if (bulkRunning) return;
+
+  // Conversarium access is confirmed from a user gesture before any
+  // ChatGPT call (R-04 step 1).
+  let lib;
+  try {
+    lib = await ensureLibrary();
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // picker cancelled
+    throw e;
+  }
+  if (!lib) return;
+
+  const resumable = await importResumable();
+  if (resumable) {
+    await resumeImport();
+  } else {
+    await startNewImport();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,149 +465,13 @@ async function loadAll() {
 }
 
 // ---------------------------------------------------------------------------
-// DOWNLOAD: ChatGPT -> library folder.
-
-async function fetchAllSummaries() {
-  const all = new Map();
-  let offset = 0;
-  for (;;) {
-    const data = await listConversations(offset, BATCH);
-    const items = (data && data.items) || [];
-    for (const item of items) {
-      const c = normalizeConversationSummary(item);
-      if (!all.has(c.id)) all.set(c.id, c);
-    }
-    if (items.length < BATCH || bulkAbort) break;
-    offset += BATCH;
-    if (offset > 100 * BATCH) break; // hard safety: 100 pages
-    await sleep(300);
-  }
-  return [...all.values()];
-}
-
-async function downloadAll() {
-  if (bulkRunning) {
-    bulkAbort = true;
-    setStatus('Stopping after the current fetch…', 'warn');
-    return;
-  }
-
-  let lib;
-  try {
-    lib = await ensureLibrary();
-  } catch (e) {
-    if (e && e.name === 'AbortError') return; // picker cancelled
-    throw e;
-  }
-  if (!lib) return;
-  await refreshLibraryStatus();
-
-  bulkRunning = true;
-  bulkAbort = false;
-  exportBtn.textContent = 'Stop';
-  moreBtn.hidden = true;
-  digestBtn.disabled = true;
-  loadAllBtn.disabled = true;
-
-  try {
-    setStatus('Reading ChatGPT thread list…');
-    progressSpin('Reading ChatGPT thread list');
-    const summaries = await fetchAllSummaries();
-    if (!summaries.length) {
-      setStatus('No ChatGPT threads found — are you logged in?', 'warn');
-      return;
-    }
-    setStatus(`Found ${summaries.length} on ChatGPT · checking the Conversarium…`);
-
-    const libUpdated = new Map(libraryEnvs.map((e) => [e.id, e.updated || e.created || '']));
-    const targets = summaries.filter((c) => {
-      const have = libUpdated.get(c.id);
-      return !have || !c.updated || c.updated > have;
-    });
-    progressUpdate(0, targets.length, `0/${targets.length}`);
-
-    let downloaded = 0;
-    let unchanged = summaries.length - targets.length;
-    let failed = 0;
-    let consecutiveFails = 0;
-    let pacing = 400;
-    let recentFails = 0;
-    let recentCount = 0;
-    const failures = [];
-
-    for (let i = 0; i < targets.length; i++) {
-      if (bulkAbort) break;
-      const c = targets[i];
-      setStatus(`Importing ${i + 1}/${targets.length}: ${c.title}`, 'warn');
-      downloadBtn.textContent = `⤓ ${i + 1}/${targets.length}`;
-      try {
-        const raw = await getConversation(c.id);
-        const env = buildEnvelope(normalizeConversation(raw));
-        await writeLibraryThread(env);
-        downloaded++;
-        consecutiveFails = 0;
-      } catch (e) {
-        if (e && (e.status === 401 || e.status === 403)) {
-          console.error(`[convo-hist ${BUILD}] import stopped at "${c.title}" (${c.id}): ${e.message}`);
-          setStatus(`Import stopped: ${e.message} — log in on chatgpt.com, then run Import again.`, 'err');
-          return;
-        }
-        const msg = e && e.message ? e.message : String(e);
-        console.warn(`[convo-hist ${BUILD}] import failed: "${c.title}" (${c.id}) — ${msg}`);
-        if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
-        failed++;
-        consecutiveFails++;
-        recentFails++;
-        if (recentFails >= 2 && pacing < 8000) {
-          pacing = Math.min(pacing * 2, 8000);
-          console.warn(`[convo-hist ${BUILD}] throttling: pacing raised to ${pacing}ms (rate limiter active)`);
-        }
-        if (e && e.retryAfterMs) await sleep(e.retryAfterMs);
-        if (consecutiveFails >= 3) {
-          setStatus(
-            `Import paused: 3 in a row failed (last: ${c.title} — ${msg}). ` +
-              `Saved threads are safe in the Conversarium; run Import again to resume.`,
-            'err'
-          );
-          return;
-        }
-      }
-      recentCount++;
-      if (recentCount >= 10) { recentCount = 0; recentFails = 0; }
-      if ((i + 1) % 25 === 0) {
-        console.log(`[convo-hist ${BUILD}] import progress: ${i + 1}/${targets.length}` +
-          ` (new ${downloaded}, failed ${failed}, pacing ${pacing}ms)`);
-      }
-      progressUpdate(i + 1, targets.length, `${downloaded}/${targets.length}`);
-      await sleep(pacing);
-    }
-
-    await loadLibrary(); // the list IS the Conversarium — refresh it
-
-    const stopped = bulkAbort ? ' (stopped early — run Import again to resume)' : '';
-    const reasonNote = failed
-      ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
-      : '';
-    setStatus(
-      `Import done: ${downloaded} new, ${unchanged} unchanged, ${failed} failed — ` +
-        `the Conversarium holds ${libraryEnvs.length} threads${stopped}${reasonNote}.`,
-      failed ? 'warn' : 'ok'
-    );
-  } catch (e) {
-    setStatus(`Import failed: ${e.message}`, 'err');
-  } finally {
-    progressHide();
-    bulkRunning = false;
-    bulkAbort = false;
-    downloadBtn.textContent = 'Import';
-    updateButtons();
-  }
-}
-
-// ---------------------------------------------------------------------------
 // EXPORT: library -> vault markdown (+ optional second output folder).
 
 function exportTrigger() {
+  if (importRunning()) {
+    setStatus('An import is running — stop it first (Stop import).', 'warn');
+    return;
+  }
   if (bulkRunning) {
     bulkAbort = true;
     setStatus('Stopping after the current export…', 'warn');
@@ -556,8 +506,6 @@ async function exportTargets(targets) {
 
   bulkRunning = true;
   bulkAbort = false;
-  const prevLabel = exportBtn.textContent;
-  exportBtn.textContent = 'Stop';
   downloadBtn.disabled = true;
   moreBtn.hidden = true;
   digestBtn.disabled = true;
@@ -632,7 +580,6 @@ async function exportTargets(targets) {
     progressHide();
     bulkRunning = false;
     bulkAbort = false;
-    exportBtn.textContent = prevLabel;
     updateButtons();
     renderList();
   }
@@ -718,6 +665,10 @@ async function copyThread(chatId, fmt) {
 // DIGEST: summary + tags on library threads, written back in place.
 
 async function digestMissing() {
+  if (importRunning()) {
+    setStatus('An import is running — stop it first (Stop import).', 'warn');
+    return;
+  }
   if (bulkRunning) {
     bulkAbort = true;
     setStatus('Stopping after the current digest…', 'warn');
@@ -740,7 +691,6 @@ async function digestMissing() {
 
   bulkRunning = true;
   bulkAbort = false;
-  exportBtn.textContent = 'Stop';
   downloadBtn.disabled = true;
   moreBtn.hidden = true;
   digestBtn.disabled = true;
@@ -795,7 +745,6 @@ async function digestMissing() {
     progressHide();
     bulkRunning = false;
     bulkAbort = false;
-    exportBtn.textContent = 'Export';
     updateButtons();
     renderList();
   }
@@ -805,7 +754,7 @@ function updateButtons() {
   const n = checkedIds.size;
   selCountEl.textContent = `${n} selected`;
   loadAllBtn.hidden = !hasMore || bulkRunning;
-  digestBtn.disabled = bulkRunning;
+  digestBtn.disabled = bulkRunning || importRunning();
 }
 
 function updateSelAllState() {
@@ -840,7 +789,7 @@ function renderList() {
       return;
     }
     if (!q && !libraryEnvs.length) {
-      listEl.innerHTML = bulkRunning
+      listEl.innerHTML = (bulkRunning || importRunning())
         ? '<div class="notice">Import is running. Threads will appear here as they are saved.</div>'
         : '<div class="notice">The Conversarium is empty. Press Import to bring in ChatGPT threads.</div>';
       return;

@@ -10,21 +10,34 @@
 // content — a stale/absent entry can cause at worst an extra fetch.
 
 const KEY = 'panelState';
+const STATE_VERSION = 2;
 let cached = null;
 
 function blank() {
-  return { list: null, diff: {}, savedAt: null };
+  return { stateVersion: STATE_VERSION };
+}
+
+// Versioned migration (spec §7): pre-0.6.0 panelState carried list/diff
+// caches that Phase 2 replaced with the import checkpoint (import-state.js).
+// Obsolete fields are dropped once; settings and the coach flag survive.
+function migrate(st) {
+  if (st.stateVersion !== STATE_VERSION) {
+    delete st.list;
+    delete st.diff;
+    delete st.savedAt;
+    st.stateVersion = STATE_VERSION;
+  }
+  return st;
 }
 
 export async function loadState() {
   if (cached) return cached;
   try {
     const res = await chrome.storage.local.get(KEY);
-    cached = res && res[KEY] ? res[KEY] : blank();
+    cached = res && res[KEY] ? migrate(res[KEY]) : blank();
   } catch {
     cached = blank(); // storage unavailable — degrade to no-cache behavior
   }
-  if (!cached.diff) cached.diff = {};
   return cached;
 }
 

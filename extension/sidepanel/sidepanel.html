@@ -35,8 +35,10 @@
   <main id="chat-list" class="list" role="listbox" aria-label="Conversations"></main>
 
   <section class="actions">
-    <button id="capture-btn" class="primary" title="Import new + changed threads from ChatGPT into the Conversarium. Runs automatically when the panel opens; click again to Stop mid-run.">Import</button>
-    <button id="capture-all-btn" class="ghost" title="Export the checked threads (or all threads if none are checked) to the vault folder as Obsidian-ready markdown. Click again to Stop mid-run.">Export</button>
+    <button id="capture-btn" class="primary" title="Import new + changed threads from ChatGPT into the Conversarium. Press only when you want it to run; click Stop to cancel.">Import</button>
+    <button id="stop-btn" class="ghost" hidden title="Stop the running import. Progress is checkpointed — Resume import continues where it stopped. No further requests are made after the current one settles.">Stop import</button>
+    <button id="new-import-btn" class="ghost" hidden title="Discard the unfinished import checkpoint (imported threads are kept) and start a fresh scan of the ChatGPT thread list.">Start new import</button>
+    <button id="capture-all-btn" class="ghost" title="Export the checked threads (or all threads if none are checked) to the vault folder as Obsidian-ready markdown.">Export</button>
     <button id="digest-btn" class="ghost" title="Digest: ask the local AI to write a short summary and tags for Conversarium threads that lack one. Saved in place — run Export afterwards to update your vault.">Digest</button>
     <button id="more-btn" class="ghost" hidden title="Fetch the next page of the ChatGPT thread list.">Load more</button>
   </section>

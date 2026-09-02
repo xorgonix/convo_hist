@@ -15,14 +15,18 @@ import (
 // mockState is mutated by tests between/within runs; the hijack router reads it.
 type mockState struct {
 	mu           sync.Mutex
-	Total        int               // total conversations reported by the list endpoint
-	titles       map[string]string // per-id title overrides (title-change test)
-	updateTime   map[string]int64  // per-id update_time overrides (diff tests)
+	Total        int                      // total conversations reported by the list endpoint
+	titles       map[string]string        // per-id title overrides (title-change test)
+	updateTime   map[string]int64         // per-id update_time overrides (diff tests)
 	convDelay    map[string]time.Duration // per-id server-side delay (stop-mid-batch test)
-	fail401For   string            // conversation id that returns 401
-	malformedFor string            // conversation id that returns mapping:{} payload
-	listStatus   int               // non-zero => list endpoint returns this status
-	reqCounts    map[string]int    // pattern label -> hit count
+	fail401For   string                   // conversation id that returns 401
+	malformedFor string                   // conversation id that returns mapping:{} payload
+	notFoundFor  string                   // conversation id that returns 404 (A-12)
+	listStatus   int                      // non-zero => list endpoint returns this status
+	listDelay    time.Duration            // server-side delay on every list page (A-06/A-07)
+	list429Once  string                   // first list hit returns 429 with this Retry-After value (A-10)
+	list429Done  bool
+	reqCounts    map[string]int // pattern label -> hit count
 }
 
 func newMockState(total int) *mockState {
@@ -33,6 +37,28 @@ func newMockState(total int) *mockState {
 		convDelay:  map[string]time.Duration{},
 		reqCounts:  map[string]int{},
 	}
+}
+
+func (s *mockState) setListDelay(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listDelay = d
+}
+
+// armList429 makes the FIRST list request return 429 with the given
+// Retry-After header value (delta-seconds or HTTP-date); later requests
+// pass through to the normal fixture.
+func (s *mockState) armList429(retryAfter string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.list429Once = retryAfter
+	s.list429Done = false
+}
+
+func (s *mockState) setNotFoundFor(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notFoundFor = id
 }
 
 func (s *mockState) setTitle(id, title string) {
@@ -165,13 +191,26 @@ func (s *mockState) createFor(id string) int64 {
 	return baseG + int64(n)*3600 - 60
 }
 
-func (s *mockState) respondList(offset, limit int) string {
-	s.hit("list")
+// respondList returns (httpCode, retryAfterHeaderValue, body). The 429 arm
+// fires once per mockState (A-10) with the configured Retry-After value.
+func (s *mockState) respondList(offset, limit int) (int, string, string) {
 	s.mu.Lock()
 	status := s.listStatus
+	delay := s.listDelay
+	ra429 := ""
+	if s.list429Once != "" && !s.list429Done {
+		ra429 = s.list429Once
+		s.list429Done = true
+	}
 	s.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	if status != 0 {
-		return fmt.Sprintf(`{"status":%d,"detail":"mock fault"}`, status)
+		return status, "", fmt.Sprintf(`{"status":%d,"detail":"mock fault"}`, status)
+	}
+	if ra429 != "" {
+		return 429, ra429, `{"detail":"mock rate limit"}`
 	}
 
 	s.mu.Lock()
@@ -196,7 +235,7 @@ func (s *mockState) respondList(offset, limit int) string {
 		"items": items,
 		"total": total,
 	})
-	return string(out)
+	return 200, "", string(out)
 }
 
 // respondConversation builds the full mapping payload for one conversation.
@@ -207,6 +246,7 @@ func (s *mockState) respondConversation(id string) (int, string) {
 	// (never call locking helpers while holding the mutex).
 	s.mu.Lock()
 	fault401 := s.fail401For == id
+	notFound := s.notFoundFor == id
 	malformed := s.malformedFor == id
 	delay := s.convDelay[id]
 	s.mu.Unlock()
@@ -220,6 +260,10 @@ func (s *mockState) respondConversation(id string) (int, string) {
 	}
 	if fault401 {
 		return http.StatusUnauthorized, `{"detail":"Unauthorized"}`
+	}
+	if notFound {
+		// 404/deleted thread: classified 'not-found', not a rate-limit event (R-08).
+		return http.StatusNotFound, `{"detail":"Conversation not found"}`
 	}
 
 	if malformed {

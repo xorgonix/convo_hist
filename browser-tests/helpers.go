@@ -592,6 +592,73 @@ func (s *tb) openExtPage(path string) {
 	s.logf("opened extension page %s", path)
 }
 
+// checkpointJSON returns a compact summary of the durable import checkpoint
+// (chrome.storage.local — real storage, survives page reloads).
+func (s *tb) checkpointJSON() string {
+	s.t.Helper()
+	return s.page.MustEval(`async () => {
+      const m = await import(chrome.runtime.getURL('lib/import-state.js'));
+      const cp = await m.loadCheckpoint();
+      return JSON.stringify({
+        hasJob: !!cp.importJob.jobId,
+        state: cp.importJob.state,
+        pauseReason: cp.importJob.pauseReason,
+        nextOffset: cp.chatgptList.nextOffset,
+        complete: cp.chatgptList.complete,
+        items: cp.chatgptList.items.length,
+        targets: cp.importJob.targetIds.length,
+        attempted: cp.importJob.attemptedIds.length,
+        saved: cp.importJob.counters.saved,
+        failed: cp.importJob.counters.failed,
+        unchanged: cp.importJob.counters.unchanged,
+        failures: cp.importJob.failures.length,
+        nextAllowedAt: cp.importJob.pacing.nextAllowedAt
+      });
+    }`).Str()
+}
+
+// waitCheckpoint polls until the checkpoint summary contains substr.
+func (s *tb) waitCheckpoint(substr string, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := "\x00"
+	for time.Now().Before(deadline) {
+		cur := s.checkpointJSON()
+		if cur != last {
+			s.logf("checkpoint poll: %s", cur)
+			last = cur
+		}
+		if strings.Contains(cur, substr) {
+			return
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	s.failf("timeout waiting for checkpoint containing %q; last=%s", substr, s.checkpointJSON())
+}
+
+// waitCooldownAtLeast polls until the persisted 429 cooldown has at least
+// ms milliseconds remaining — proving the Retry-After value (not just any
+// pacing timestamp) survived. Fails the test if the cooldown never reaches
+// the floor or expires before the wait completes.
+func (s *tb) waitCooldownAtLeast(ms int, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		v := s.page.MustEval(`async () => {
+          const m = await import(chrome.runtime.getURL('lib/import-state.js'));
+          const cp = await m.loadCheckpoint();
+          return cp.importJob.pacing.nextAllowedAt
+            ? cp.importJob.pacing.nextAllowedAt - Date.now() : -1;
+        }`).Int()
+		if v >= ms {
+			s.logf("persisted cooldown has %dms remaining (floor %dms)", v, ms)
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	s.failf("cooldown never reached %dms remaining within %v", ms, timeout)
+}
+
 // waitText waits until the element's textContent contains substr.
 func (s *tb) waitText(sel, substr string, timeout time.Duration) {
 	s.t.Helper()
