@@ -8,8 +8,10 @@
 //      service worker (different execution context, same permissions)
 //
 // BUILD stamp is logged at import so stale-code confusion dies forever.
+// Single authoritative version source: the manifest (R-15). No hard-coded
+// release strings anywhere in runtime code.
 
-export const BUILD = 'v0.5.3-coach';
+export const BUILD = `v${chrome.runtime.getManifest().version}`;
 
 const ORIGIN = 'https://chatgpt.com';
 const TOKEN_TTL_MS = 10 * 60 * 1000;

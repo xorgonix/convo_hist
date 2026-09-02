@@ -1,6 +1,6 @@
 # browser-tests — Rod-based browser verification for Convo Hist
 
-Per `extension/SPECS/APPROACH.md`. 25 tests: P0 smoke (4), P1 core journeys
+Per `extension/SPECS/deprecated/APPROACH.md`. 25 tests: P0 smoke (4), P1 core journeys
 (11), P2 edges (9), plus a recorded new-user journey that produces the
 narrated walkthrough videos.
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Convo Hist",
-  "version": "0.5.3",
-  "description": "Local-first ChatGPT conversation archive: capture, index, search, export.",
+  "name": "Thread-O-matic",
+  "version": "0.6.0",
+  "description": "Thread-O-matic: local-first ChatGPT thread archive. Import to the Conversarium, export markdown to your vault.",
   "minimum_chrome_version": "116",
   "permissions": [
     "sidePanel",
@@ -22,18 +22,11 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Convo Hist"
+    "default_title": "Thread-O-matic"
   },
   "side_panel": {
     "default_path": "sidepanel/sidepanel.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-      "js": ["content/content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }

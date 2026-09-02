@@ -24,10 +24,25 @@ var _ = http.StatusText // net/http reserved for future response helpers
 //go:embed e2efs-polyfill.js
 var polyfillJS string
 
-const (
-	buildStamp = "v0.4.0-library"
-	panelPath  = "sidepanel/sidepanel.html"
-)
+const panelPath = "sidepanel/sidepanel.html"
+
+// buildStamp derives from the extension manifest (R-15: one authoritative
+// version source). The runtime BUILD constant is `v` + manifest version, so
+// the harness expectation is constructed the same way — no hard-coded
+// release string can drift out of coherence again.
+var buildStamp = func() string {
+	raw, err := os.ReadFile(filepath.Join("..", "extension", "manifest.json"))
+	if err != nil {
+		panic("e2e harness: cannot read extension/manifest.json: " + err.Error())
+	}
+	var m struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil || m.Version == "" {
+		panic("e2e harness: cannot parse manifest version")
+	}
+	return "v" + m.Version
+}()
 
 var (
 	artifactsDir string
@@ -562,7 +577,9 @@ func (s *tb) grantFolder() {
 	s.logf("folder granted")
 }
 
-// fsFiles returns the file list inside the in-memory fake archive.
+// fsFiles returns the file list across ALL fake roots merged, bare relative
+// paths (legacy single-root behavior). Use fsFilesIn(root) to scope to one
+// picker-id root for isolation assertions (A-15).
 func (s *tb) fsFiles() []string {
 	s.t.Helper()
 	v := s.page.MustEval(`() => window.__e2eFsSnapshot ? window.__e2eFsSnapshot() : "[]"`)
@@ -572,6 +589,38 @@ func (s *tb) fsFiles() []string {
 		return nil
 	}
 	return out
+}
+
+// fsFilesIn returns bare relative paths inside ONE fake root (picker id).
+func (s *tb) fsFilesIn(root string) []string {
+	s.t.Helper()
+	v := s.page.MustEval(`(root) => window.__e2eFsSnapshot(root)`, root)
+	var out []string
+	if err := json.Unmarshal([]byte(v.Str()), &out); err != nil {
+		s.failf("fs snapshot(%s): %v (raw=%q)", root, err, v.Str())
+		return nil
+	}
+	return out
+}
+
+// fsRoots lists the fake roots created so far (picker ids).
+func (s *tb) fsRoots() []string {
+	s.t.Helper()
+	v := s.page.MustEval(`() => window.__e2eFsRoots ? window.__e2eFsRoots() : "[]"`)
+	var out []string
+	if err := json.Unmarshal([]byte(v.Str()), &out); err != nil {
+		s.failf("fs roots: %v (raw=%q)", err, v.Str())
+		return nil
+	}
+	return out
+}
+
+// fsSetPermission drives the polyfill's per-root permission model
+// ('granted' | 'prompt' | 'denied') — foundation for A-13/A-14.
+func (s *tb) fsSetPermission(root, state string) {
+	s.t.Helper()
+	s.page.MustEval(`(root, state) => window.__e2eFsSetPermission(root, state)`, root, state)
+	s.logf("fs permission %s -> %s", root, state)
 }
 
 func (s *tb) fsCount(suffix string) int {

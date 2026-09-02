@@ -10,7 +10,7 @@
 import { idbGet, idbSet, idbDel } from './idb.js';
 import { baseName } from './naming.js';
 
-// Test-hook (documented, APPROACH.md §6): e2e pages grant all three folders
+// Test-hook (documented, extension/SPECS/deprecated/APPROACH.md §6): e2e pages grant all three folders
 // non-interactively — the polyfilled showDirectoryPicker needs no gesture,
 // and this keeps tests deterministic without UI-specific clicking.
 const IS_E2E = (() => {
@@ -208,7 +208,7 @@ export async function getArchiveHandle({ interactive = false } = {}) {
   }
 
   if (!interactive) return null;
-  cachedHandle = await showDirectoryPicker({ mode: 'readwrite' });
+  cachedHandle = await showDirectoryPicker({ mode: 'readwrite', id: 'convo-archive' });
   await idbSet(HANDLE_KEY, cachedHandle);
   return cachedHandle;
 }
@@ -309,56 +309,4 @@ export async function archiveStatus() {
     return { state: 'granted', name: stored.name };
   }
   return { state: 'needs-permission', name: stored.name };
-}
-
-// ---------------------------------------------------------------------------
-// Rebuild-from-disk: the proof that disk is the source of truth. Reads every
-// canonical envelope back out of chats/ — the browser cache could be wiped
-// entirely and this would still reconstruct the archive's metadata.
-
-export async function readArchiveEnvelopes() {
-  const root = await getArchiveHandle({ interactive: false });
-  if (!root) return { envelopes: [], skipped: 0, noFolder: true };
-
-  let chats;
-  try {
-    chats = await root.getDirectoryHandle('chats');
-  } catch {
-    return { envelopes: [], skipped: 0, noFolder: false }; // no captures yet
-  }
-
-  const envelopes = [];
-  let skipped = 0;
-  for await (const entry of chats.values()) {
-    if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue;
-    try {
-      const file = await entry.getFile();
-      const env = JSON.parse(await file.text());
-      if (env && env.id) envelopes.push(env);
-      else skipped++;
-    } catch {
-      skipped++;
-    }
-  }
-  return { envelopes, skipped, noFolder: false };
-}
-
-// Writes the generated index set produced by lib/indexes.js buildAllIndexes().
-export async function writeDerivedViews(indexes) {
-  const root = await getArchiveHandle({ interactive: false });
-  if (!root) {
-    throw Object.assign(new Error('No archive folder granted'), { code: 'NO_FOLDER' });
-  }
-
-  await writeText(root, ['indexes'], 'INDEX.md', indexes.home);
-  await writeText(root, ['indexes'], 'timeline.md', indexes.timeline);
-  for (const m of indexes.months) {
-    await writeText(root, ['indexes'], `${m.name}.md`, m.md);
-  }
-  for (const t of indexes.tags) {
-    await writeText(root, ['indexes', 'tags'], `${t.slug}.md`, t.md);
-  }
-  return {
-    files: 2 + indexes.months.length + indexes.tags.length
-  };
 }

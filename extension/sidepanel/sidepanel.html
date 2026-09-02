@@ -3,47 +3,47 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Convo Hist</title>
+  <title>Thread-O-matic</title>
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">Convo&nbsp;Hist <span id="build-label" class="build">build: loading…</span></div>
-    <button id="settings-btn" class="ghost" title="Settings: folders, summarizer, output options">⚙</button>
-    <button id="help-btn" class="ghost" title="Help — how everything works">?</button>
-    <button id="folder-btn" class="ghost" title="Choose the vault folder (markdown exports)">
+    <div class="brand">Thread-O-matic <span id="build-label" class="build">build: loading…</span></div>
+    <button id="settings-btn" class="ghost" title="Open Settings — choose your folders, configure the local AI summarizer, and set output options.">⚙</button>
+    <button id="help-btn" class="ghost" title="Open Help — a full guide to every button, folder, and status message.">?</button>
+    <button id="folder-btn" class="ghost" title="Your vault folder — markdown exports are written here. Click to choose a folder, or to re-allow access if the browser dropped it.">
       <span id="folder-label">Vault folder…</span>
     </button>
   </header>
 
   <section class="searchbar">
     <div class="searchrow">
-      <input id="search" type="search" placeholder="Search your archive…" title="Search inside downloaded threads — filters: user: assistant: code:" autofocus />
-      <button id="reload-btn" class="ghost" title="Re-read the library folder (picks up manually added files)">↻</button>
+      <input id="search" type="search" placeholder="Search the Conversarium…" title="Search inside every thread in the Conversarium. Filters: user: (your messages only), assistant: (replies only), code: (threads containing code blocks)." autofocus />
+      <button id="reload-btn" class="ghost" title="Re-read the library folder from disk — picks up files you added or moved manually. Never contacts ChatGPT.">↻</button>
     </div>
     <span id="search-hint" class="hint">message-level search · filters: user: assistant: code:</span>
   </section>
 
   <section class="list-tools">
-    <label class="selall" title="Check every thread in the list for export"><input type="checkbox" id="sel-all" /> Select all</label>
-    <span id="sel-count" class="hint" title="How many threads are selected for export">0 selected</span>
+    <label class="selall" title="Check every thread in the list — Export then writes all of them to the vault."><input type="checkbox" id="sel-all" /> Select all</label>
+    <span id="sel-count" class="hint" title="How many threads are checked for Export.">0 selected</span>
     <span id="library-hint" class="hint"></span>
     <span class="spacer"></span>
-    <button id="load-all-btn" class="ghost" hidden title="Fetch every page of the conversation list">Load all</button>
+    <button id="load-all-btn" class="ghost" hidden title="Fetch every page of the ChatGPT thread list right now. Normally unnecessary — Import caches the list automatically.">Load all</button>
   </section>
 
   <main id="chat-list" class="list" role="listbox" aria-label="Conversations"></main>
 
   <section class="actions">
-    <button id="capture-btn" class="primary" title="Download new + changed threads from ChatGPT into the library folder">Download</button>
-    <button id="capture-all-btn" class="ghost" title="Write the selected threads (or all) to the vault folder as markdown">Export</button>
-    <button id="digest-btn" class="ghost" title="Summarize + tag library threads that lack it">Digest</button>
-    <button id="more-btn" class="ghost" hidden title="Fetch the next page of the conversation list">Load more</button>
+    <button id="capture-btn" class="primary" title="Import new + changed threads from ChatGPT into the Conversarium. Runs automatically when the panel opens; click again to Stop mid-run.">Import</button>
+    <button id="capture-all-btn" class="ghost" title="Export the checked threads (or all threads if none are checked) to the vault folder as Obsidian-ready markdown. Click again to Stop mid-run.">Export</button>
+    <button id="digest-btn" class="ghost" title="Digest: ask the local AI to write a short summary and tags for Conversarium threads that lack one. Saved in place — run Export afterwards to update your vault.">Digest</button>
+    <button id="more-btn" class="ghost" hidden title="Fetch the next page of the ChatGPT thread list.">Load more</button>
   </section>
 
   <div id="coach" class="coach" hidden>
     <div class="coach-card">
-      <h2 id="coach-title">Welcome to Convo Hist</h2>
+      <h2 id="coach-title">Welcome to Thread-O-matic</h2>
       <p id="coach-body"></p>
       <div class="coach-foot">
         <span id="coach-step" class="coach-step"></span>

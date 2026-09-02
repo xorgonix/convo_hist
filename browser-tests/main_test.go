@@ -1,5 +1,5 @@
 // main_test.go — the Convo Hist v0.1.6 browser verification suite.
-// Priorities per SPECS/APPROACH.md §5: P0 smoke → P1 journeys → P2 edges.
+// Priorities per SPECS/deprecated/APPROACH.md §5: P0 smoke → P1 journeys → P2 edges.
 // Each test gets a fresh headed browser + unpacked extension + mocked API.
 package e2e
 
@@ -820,6 +820,7 @@ func writeResultsAndReport(exitCode int) {
 		"run_id":        runID,
 		"finished":      time.Now().Format(time.RFC3339),
 		"exit_code":     exitCode,
+		"product_ver":   buildStamp,
 		"chrome":        chromeVer,
 		"browser_bin":   binUsed,
 		"go":            runtime.Version(),
@@ -835,7 +836,7 @@ func writeResultsAndReport(exitCode int) {
 	os.WriteFile(filepath.Join(artifactsDir, "results.json"), raw, 0o644)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Convo Hist v0.1.6 — Browser Verification Report\n\n")
+	fmt.Fprintf(&b, "# Thread-O-matic %s — Browser Verification Report\n\n", buildStamp)
 	fmt.Fprintf(&b, "Run: `%s`\n\n", runID)
 	fmt.Fprintf(&b, "## Browser Verification Summary\n\n")
 	verdict := "PASS"

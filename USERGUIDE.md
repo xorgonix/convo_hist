@@ -183,4 +183,4 @@ not.
   a mocked ChatGPT API. See `browser-tests/README.md`.
 - **Slides:** `slides/index.html` — reveal.js presentation covering the
   architecture (open in a browser).
-- **Specs:** `extension/SPECS/APPROACH.md`.
+- **Specs:** `extension/SPECS/deprecated/APPROACH.md`.

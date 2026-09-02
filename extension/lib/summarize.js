@@ -23,7 +23,7 @@ export async function detectBackend() {
   const cfg = await getSettings().catch(() => ({}));
   const forced = cfg.summarizer || 'auto';
 
-  // Test-hook (documented, APPROACH.md §6): e2e pages force the extractive
+  // Test-hook (documented, extension/SPECS/deprecated/APPROACH.md §6): e2e pages force the extractive
   // backend so digests are deterministic regardless of LLMs on the host.
   try {
     if (new URLSearchParams(location.search).has('e2e')) {

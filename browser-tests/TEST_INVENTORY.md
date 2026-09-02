@@ -1,6 +1,6 @@
 # Convo Hist v0.1.6 — Browser Test Inventory
 
-Method: Go + Rod per `SPECS/APPROACH.md`. Chrome headed by default, real extension loaded
+Method: Go + Rod per `SPECS/deprecated/APPROACH.md`. Chrome headed by default, real extension loaded
 unpacked, network mocked at the CDP layer (chatgpt.com endpoints), archive filesystem
 replaced by a faithful in-memory File System Access polyfill injected before page scripts.
 

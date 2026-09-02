@@ -1,16 +1,18 @@
-// sidepanel.js — v0.5.0: library-first, minimal buttons.
+// sidepanel.js — v0.6.0 Phase 0 baseline. The v0.5.x workflow is intact;
+// v0.6.0 phases (spec: extension/SPECS/Thread-O-matic-v0.6.0-Extension-Change-Specification.md) restructure it:
 //
 //   THE PANEL LIST IS THE LIBRARY. A line item means the JSON file exists
 //   in the library folder. Nothing else is listed.
 //
 //   DOWNLOAD: crawl ChatGPT's list -> write new/changed threads into
 //   <library>/threads/<Title> (<id>).json. Paced, honors retry-after,
-//   self-throttling, resumable.
+//   self-throttling, resumable. (Phase 2 replaces this with the import
+//   controller: durable checkpoint, no auto-start, AbortSignal Stop.)
 //
 //   EXPORT: selected threads (or all if none selected) -> vault folder as
 //   markdown (frontmatter built from the envelope) and, if configured, a
-//   second output folder as markdown or JSON. Before writing, each thread
-//   is compared against the live ChatGPT list and refreshed if stale.
+//   second output folder as markdown or JSON. (Phase 4 makes this
+//   strictly local-only: no ChatGPT refresh during Export.)
 //
 //   DIGEST: fills summary + tags on library threads in place.
 //

@@ -37,25 +37,9 @@ async function persist(st) {
   }
 }
 
-export async function saveList(summaries) {
-  const st = await loadState();
-  st.list = summaries;
-  st.savedAt = new Date().toISOString();
-  await persist(st);
-}
-
-export async function saveDiffMap(mapObj) {
-  const st = await loadState();
-  st.diff = mapObj;
-  await persist(st);
-}
-
-// Fire-and-forget single-entry update after a successful capture.
-export async function setDiffEntry(id, updated) {
-  const st = await loadState();
-  st.diff[id] = updated;
-  await persist(st);
-}
+// Phase 2 replaces the old list/diff cache APIs (saveList/saveDiffMap/
+// setDiffEntry — removed as unused) with the versioned import-checkpoint
+// model in lib/import-state.js.
 
 // "Keep JSON backups in the vault" toggle (default OFF: the vault is
 // markdown-first; the library folder holds the raw JSON).
