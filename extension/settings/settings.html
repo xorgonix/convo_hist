@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Convo Hist — Settings</title>
+  <title>Thread-O-matic — Settings</title>
   <link rel="stylesheet" href="../sidepanel/sidepanel.css" />
   <style>
     .settings-wrap { max-width: 720px; margin: 0 auto; padding: 24px; }
@@ -25,35 +25,43 @@
 </head>
 <body>
   <div class="settings-wrap">
-    <h1>Convo Hist — Settings</h1>
+    <h1>Thread-O-matic — Settings</h1>
     <div class="sub" id="build-label">build: loading…</div>
 
     <div class="card">
       <h2>Folders</h2>
       <div class="row">
-        <label>Library — downloaded thread JSON</label>
+        <label>Conversarium — thread JSON (source of truth)</label>
         <button id="library-btn" class="ghost">Choose folder…</button>
+        <button id="library-reconnect" class="ghost" hidden>Reconnect</button>
         <span id="library-label" class="path">not set</span>
-        <button id="library-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
+        <button id="library-verify" class="ghost" title="Write a marker file so you can confirm exactly which folder this is">Verify</button>
+        <button id="library-forget" class="ghost" hidden title="Forget this folder in Thread-O-matic. No files are deleted.">Forget</button>
       </div>
-      <div class="note">One file per thread: <code>threads/&lt;Title&gt; (&lt;id&gt;).json</code>. "Test" writes a marker file (<code>_convo_hist_here.txt</code>) into the folder so you can see exactly where it is in Explorer.</div>
+      <div class="note">One file per thread: <code>threads/&lt;Title&gt; (&lt;id&gt;).json</code>. "Verify" writes a marker file (<code>_thread_o_matic_here.txt</code>) into the folder so you can see exactly where it is in Explorer.</div>
       <div class="row">
         <label>Vault / Obsidian (markdown only)</label>
         <button id="vault-btn" class="ghost">Choose folder…</button>
+        <button id="vault-reconnect" class="ghost" hidden>Reconnect</button>
         <span id="vault-label" class="path">not set</span>
-        <button id="vault-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
+        <button id="vault-verify" class="ghost" title="Write a marker file so you can confirm exactly which folder this is">Verify</button>
+        <button id="vault-forget" class="ghost" hidden title="Forget this folder in Thread-O-matic. No files are deleted.">Forget</button>
       </div>
+      <div class="note">Exports are written into a <code>chats/</code> subfolder of the vault as <code>&lt;Title&gt; (&lt;id&gt;).md</code> — never JSON.</div>
       <div class="row">
         <label>Second output folder (optional)</label>
         <button id="plain-btn" class="ghost">Choose folder…</button>
+        <button id="plain-reconnect" class="ghost" hidden>Reconnect</button>
         <span id="plain-label" class="path">not set</span>
         <select id="plain-format">
           <option value="md">markdown</option>
           <option value="json">JSON</option>
         </select>
-        <button id="plain-verify" class="ghost" title="Write a test file so you can confirm exactly which folder this is">Test</button>
+        <button id="plain-verify" class="ghost" title="Write a marker file so you can confirm exactly which folder this is">Verify</button>
+        <button id="plain-forget" class="ghost" hidden title="Forget this folder in Thread-O-matic. No files are deleted.">Forget</button>
       </div>
       <div class="note">Exports copy here too, as markdown or JSON — for backups or non-Obsidian pipelines.</div>
+      <div class="note">Why you only see the folder's <i>name</i>: Chromium deliberately never exposes full filesystem paths to extensions. "Verify" writes a marker file so you can confirm the real location in Explorer, and "Change folder…" always opens the native picker so you can pick a different folder at any time.</div>
     </div>
 
     <div class="card">

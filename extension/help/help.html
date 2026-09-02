@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Convo Hist — Help</title>
+  <title>Thread-O-matic — Help</title>
   <link rel="stylesheet" href="../sidepanel/sidepanel.css" />
   <style>
     .help-wrap { max-width: 760px; margin: 0 auto; padding: 24px; }
@@ -31,48 +31,56 @@
 </head>
 <body>
   <div class="help-wrap">
-    <h1>Convo Hist — Help</h1>
+    <h1>Thread-O-matic — Help</h1>
     <div class="sub" id="build-label">build: loading…</div>
 
     <div class="card">
       <h2>The idea</h2>
-      <p>Every ChatGPT thread you download becomes a <b>JSON file in your
-      Library folder</b> — the source of truth. Exporting turns those files
-      into <b>markdown in your Vault folder</b> (Obsidian-ready, with
-      frontmatter). A line in the panel means the file exists on disk —
-      nothing else is listed.</p>
+      <p><b>Import</b> reads conversation metadata and bodies from ChatGPT and
+      writes one JSON file per thread into the <b>Conversarium</b> — the folder
+      holding your canonical thread JSON. <b>Browse/Search</b> reads the files
+      that actually exist there. <b>Digest</b> adds local summaries and tags to
+      those files. <b>Export</b> converts Conversarium JSON into markdown in
+      your vault — Export is local and makes no ChatGPT requests. A line in the
+      panel means the file exists on disk — nothing else is listed.</p>
     </div>
 
     <div class="card">
       <h2>First-time setup</h2>
       <ul>
         <li>Open <b>⚙ Settings</b> in the panel header.</li>
-        <li><b>Library</b> — choose the folder where downloaded JSONs live
-        (e.g. <code>F:\chatgpt_threads</code>).</li>
+        <li><b>Conversarium</b> — choose the folder where imported thread JSONs
+        live (e.g. <code>F:\chatgpt_threads</code>).</li>
         <li><b>Vault</b> — choose the folder for markdown exports.</li>
-        <li><b>Test</b> writes a marker file
-        (<code>_convo_hist_here.txt</code>) into each folder — check it in
+        <li><b>Verify</b> writes a marker file
+        (<code>_thread_o_matic_here.txt</code>) into each folder — check it in
         Explorer to confirm the exact location. The browser cannot show full
         paths; this is how you verify.</li>
+        <li><b>Change folder…</b> always opens the picker, even when a folder is
+        already set. <b>Reconnect</b> restores access after the browser drops
+        it. <b>Forget</b> removes only the saved handle — it never deletes
+        files.</li>
       </ul>
     </div>
 
     <div class="card">
       <h2>Panel buttons</h2>
       <table>
-        <tr><td><span class="kbd">Download</span></td><td>Crawl ChatGPT's list and download
-        new + changed threads into the library. Auto-runs when the panel opens.
+        <tr><td><span class="kbd">Import</span></td><td>Read ChatGPT and save new or
+        changed threads as JSON in the Conversarium. Runs only when you press it.
         Paced, self-throttling on rate limits, resumable — a paused run continues
         where it stopped.</td></tr>
-        <tr><td><span class="kbd">Export</span></td><td>Write markdown for the
-        <b>selected</b> threads (or all, if none selected) into the Vault.
-        Before writing, each thread is compared with ChatGPT's live list and
-        refreshed if stale. Pure local file writes.</td></tr>
-        <tr><td><span class="kbd">Digest</span></td><td>Add a summary + tags to
-        every thread that lacks them, into the library JSON. Run Export
-        afterwards to refresh the vault markdown.</td></tr>
-        <tr><td><span class="kbd">↻</span></td><td>Re-read the library folder —
-        picks up files you added or moved manually.</td></tr>
+        <tr><td><span class="kbd">Export</span></td><td>Convert the <b>selected</b>
+        Conversarium threads (or all, if none are selected) to the configured
+        output folders. Export renders exactly what is currently in the
+        Conversarium — run Import first to pull the newest ChatGPT content.
+        No ChatGPT access happens during Export.</td></tr>
+        <tr><td><span class="kbd">Digest</span></td><td>Add a local summary + tags
+        to every thread that lacks them, into the Conversarium JSON. Run Export
+        afterwards to refresh the vault markdown. Optional local AI backends
+        (Ollama, LM Studio) are contacted on localhost only when configured.</td></tr>
+        <tr><td><span class="kbd">↻</span></td><td>Reload Conversarium — re-reads
+        the local folder. This does not contact ChatGPT.</td></tr>
       </table>
     </div>
 
@@ -81,15 +89,17 @@
       <ul>
         <li><b>Click</b> a row — select it for export. <b>Select all</b> — the
         checkbox at the top. <b>Double-click</b> a row — export just that
-        thread.</li>
-        <li><b>📄J</b> — copy the thread's JSON to the clipboard.</li>
-        <li><b>📄M</b> — copy freshly-rendered markdown to the clipboard.</li>
+        thread (local only; no ChatGPT request).</li>
+        <li><b>📄J</b> — copy this Conversarium thread's canonical JSON to the
+        clipboard.</li>
+        <li><b>📄M</b> — render this Conversarium thread as markdown and copy
+        it.</li>
       </ul>
     </div>
 
     <div class="card">
       <h2>Search</h2>
-      <p>Searches <b>inside</b> downloaded threads. Try:
+      <p>Searches <b>inside</b> Conversarium threads. Try:
       <code>hydration</code> (fuzzy), <code>code:</code> (threads with code
       blocks), <code>user: topic</code> (your messages only),
       <code>assistant: topic</code> (replies only). Result cards show tag
@@ -99,21 +109,23 @@
     <div class="card">
       <h2>Where everything lives</h2>
       <table>
-        <tr><td>Library folder</td><td><code>threads/&lt;Title&gt; (&lt;id&gt;).json</code> — the source of truth</td></tr>
-        <tr><td>Vault folder</td><td><code>&lt;Title&gt; (&lt;id&gt;).md</code> — markdown, never JSON</td></tr>
-        <tr><td>Browser</td><td>Tiny caches only (list, settings) — no thread data</td></tr>
+        <tr><td>Conversarium</td><td><code>threads/&lt;Title&gt; (&lt;id&gt;).json</code> — the source of truth</td></tr>
+        <tr><td>Vault</td><td><code>chats/&lt;Title&gt; (&lt;id&gt;).md</code> — markdown, never JSON</td></tr>
+        <tr><td>Browser</td><td>Tiny caches only (settings, import checkpoint) — no thread data</td></tr>
       </table>
-      <p>Re-download is always possible while threads exist in your ChatGPT
-      account — deleting the library is recoverable.</p>
+      <p>Re-import is always possible while threads exist in your ChatGPT
+      account — deleting the Conversarium is recoverable. Forgetting a folder
+      never deletes the folder or any file in it.</p>
     </div>
 
     <div class="card">
       <h2>Status messages</h2>
       <table>
-        <tr><td>Download paused (3 in a row)</td><td>Rate-limited by ChatGPT. Press Download again to resume; pacing self-adjusts.</td></tr>
-        <tr><td>HTTP 401 / 403</td><td>Session expired — log in at chatgpt.com, then ↻ and Download.</td></tr>
+        <tr><td>Import paused (3 in a row)</td><td>Rate-limited by ChatGPT. Press Import again to resume; pacing self-adjusts.</td></tr>
+        <tr><td>HTTP 401 / 403</td><td>Session expired — log in at chatgpt.com, then press Import again.</td></tr>
         <tr><td>HTTP 429</td><td>Rate limit — pacing rises automatically (up to 8s) and server retry-after is honored.</td></tr>
-        <tr><td>library: not set</td><td>⚙ Settings → choose the library folder.</td></tr>
+        <tr><td>Conversarium: not set</td><td>Choose a Conversarium folder — ⚙ Settings, or the button in the panel.</td></tr>
+        <tr><td>… — access needed</td><td>The browser dropped folder permission. Click the folder label (or Reconnect in Settings) to restore it.</td></tr>
         <tr><td>build: loading… stuck</td><td>Stale panel — close and reopen it.</td></tr>
       </table>
     </div>

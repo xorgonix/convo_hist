@@ -573,8 +573,42 @@ func (s *tb) clearQuery() {
 func (s *tb) grantFolder() {
 	s.t.Helper()
 	s.page.MustElement("#folder-btn").MustClick()
-	s.waitStatus("Archive folder: E2E-Archive", "ok", 6*time.Second)
+	s.waitStatus("Vault folder: E2E-", "ok", 6*time.Second)
 	s.logf("folder granted")
+}
+
+// openExtPage navigates the session's page to another extension page (e.g.
+// settings/settings.html). The polyfill was injected with EvalOnNewDocument,
+// so it stays active across navigations of this page.
+func (s *tb) openExtPage(path string) {
+	s.t.Helper()
+	url := fmt.Sprintf("chrome-extension://%s/%s?e2e=1", s.extID, path)
+	if err := s.page.Navigate(url); err != nil {
+		s.failf("navigate to %s: %v", path, err)
+		return
+	}
+	_ = s.page.WaitLoad()
+	s.page.WaitStable(300 * time.Millisecond)
+	s.logf("opened extension page %s", path)
+}
+
+// waitText waits until the element's textContent contains substr.
+func (s *tb) waitText(sel, substr string, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	last := "\x00"
+	for time.Now().Before(deadline) {
+		txt := s.text(sel)
+		if txt != last {
+			s.logf("text poll %s: %q", sel, txt)
+			last = txt
+		}
+		if strings.Contains(txt, substr) {
+			return
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	s.failf("timeout waiting for %s to contain %q; last=%q", sel, substr, s.text(sel))
 }
 
 // fsFiles returns the file list across ALL fake roots merged, bare relative

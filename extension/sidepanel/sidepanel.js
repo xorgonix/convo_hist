@@ -25,9 +25,10 @@ import {
 import { buildEnvelope } from '../lib/envelope.js';
 import { renderMarkdown } from '../lib/markdown.js';
 import {
-  getArchiveHandle, writeArchiveFile, archiveStatus,
-  getLibraryHandle, libraryStatus,
-  getPlainHandle, writePlainFile, plainStatus,
+  getCurrentArchiveHandle, reconnectArchiveHandle, chooseArchiveHandle,
+  writeArchiveFile, archiveStatus,
+  getCurrentLibraryHandle, reconnectLibraryHandle, chooseLibraryHandle, libraryStatus,
+  getCurrentPlainHandle, writePlainFile, plainStatus,
   readLibraryEnvelopes, writeLibraryThread,
 } from '../lib/fsaccess.js';
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
@@ -43,7 +44,7 @@ $('build-label').textContent = BUILD;
 
 const listEl = $('chat-list');
 const searchEl = $('search');
-const downloadBtn = $('capture-btn');    // primary: Download
+const downloadBtn = $('capture-btn');    // primary: Import
 const exportBtn = $('capture-all-btn');  // Export (selected, or all)
 const moreBtn = $('more-btn');
 const statusEl = $('status');
@@ -57,7 +58,7 @@ const selAllEl = $('sel-all');
 const selCountEl = $('sel-count');
 const loadAllBtn = $('load-all-btn');
 
-let libraryEnvs = [];      // the library: every downloaded thread (the list)
+let libraryEnvs = [];      // the Conversarium: every downloaded thread (the list)
 let exportedIds = new Set(); // in the vault (badge)
 let checkedIds = new Set();  // selected for export
 let conversations = [];      // last crawled ChatGPT summaries (staleness checks)
@@ -68,6 +69,8 @@ let searchState = null;
 let archivedCount = 0;
 let bulkRunning = false;
 let bulkAbort = false;
+let libState = { state: 'none', name: '' }; // last known Conversarium grant state (R-11 views)
+let lastUnreadable = [];  // files that failed to parse during the last scan (R-11)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isE2e = () => {
@@ -94,10 +97,13 @@ async function init() {
     renderResults(q);
   });
   folderBtn.addEventListener('click', chooseFolder);
+  // Conversarium label: click to reconnect when the browser dropped access (R-10/R-11).
+  libraryHint.addEventListener('click', ensureLibraryFromClick);
   reloadBtn.addEventListener('click', async () => {
     checkedIds.clear();
     updateButtons();
-    await loadLibrary(); // re-read the library folder
+    await refreshLibraryStatus(); // local-only: re-reads folder state, never ChatGPT
+    await loadLibrary();
   });
   digestBtn.addEventListener('click', digestMissing);
   selAllEl.addEventListener('change', () => {
@@ -108,6 +114,23 @@ async function init() {
   loadAllBtn.addEventListener('click', loadAll);
 
   listEl.addEventListener('click', async (e) => {
+    const action = e.target.closest('[data-action]');
+    if (action) {
+      e.stopPropagation();
+      if (action.getAttribute('data-action') === 'choose-library') {
+        try {
+          const h = await chooseLibraryHandle();
+          if (h) { await refreshLibraryStatus(); await loadLibrary(); }
+        } catch (err) { if (err && err.name !== 'AbortError') setStatus(`Folder error: ${err.message}`, 'err'); }
+      } else if (action.getAttribute('data-action') === 'reconnect-library') {
+        try {
+          const h = await reconnectLibraryHandle();
+          if (h) { await refreshLibraryStatus(); await loadLibrary(); }
+          else setStatus('Access was not granted. Click Reconnect to try again.', 'warn');
+        } catch (err) { if (err && err.name !== 'AbortError') setStatus(`Folder error: ${err.message}`, 'err'); }
+      }
+      return;
+    }
     const btn = e.target.closest('[data-copy]');
     if (btn) {
       e.stopPropagation();
@@ -125,8 +148,8 @@ async function init() {
   // First-run coach: shown once, skippable, never again.
   if (!isE2e() && !(await getTourDone())) showCoach();
 
-  // STAGE 1 auto-starts. e2e pages skip it for deterministic tests.
-  if (!isE2e()) downloadAll();
+  // R-01: the panel NEVER contacts ChatGPT on open. Import runs only when
+  // the user presses Import (or Resume import, once Phase 2 lands).
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +157,8 @@ async function init() {
 
 const COACH_STEPS = [
   {
-    title: 'Welcome to Convo Hist',
-    body: '<b>Download</b> pulls your ChatGPT threads into a library folder on disk — one JSON file per thread. It runs automatically, and resumes if interrupted.',
+    title: 'Welcome to Thread-O-matic',
+    body: '<b>Import</b> pulls your ChatGPT threads into the Conversarium — a folder on disk with one JSON file per thread. Press Import to start; it resumes if interrupted. Nothing runs until you press it.',
   },
   {
     title: 'Export to your vault',
@@ -221,37 +244,92 @@ function authHint(err) {
 
 async function refreshFolderStatus() {
   const st = await archiveStatus();
-  folderLabel.textContent = st.state === 'granted' ? `📁 ${st.name}` :
-    (st.state === 'needs-permission' ? `📁 ${st.name} (re-grant)` : 'Vault folder…');
+  folderLabel.textContent =
+    st.state === 'granted' ? `📁 ${st.name}` :
+    st.state === 'needs-permission' ? `📁 ${st.name} — access needed` :
+    'Vault folder…';
 }
 
 async function refreshLibraryStatus() {
   const st = await libraryStatus();
-  libraryHint.textContent = st.state === 'granted'
-    ? `library: ${st.name}`
-    : (st.state === 'needs-permission' ? `library: ${st.name} (re-grant)` : 'library: not set — ⚙ Settings');
+  libState = st;
+  libraryHint.textContent =
+    st.state === 'granted' ? `Conversarium: ${st.name}` :
+    st.state === 'needs-permission' ? `Conversarium: ${st.name} — access needed · click to reconnect` :
+    'Conversarium: not set — choose a folder';
+  libraryHint.style.cursor = st.state === 'needs-permission' ? 'pointer' : '';
 }
 
-async function chooseFolder() {
+async function ensureLibraryFromClick() {
+  const st = await libraryStatus();
+  if (st.state === 'granted') return; // nothing to fix
   try {
-    const handle = await getArchiveHandle({ interactive: true });
-    await refreshFolderStatus();
-    if (handle) setStatus(`Vault folder: ${handle.name}`, 'ok');
+    const h = st.state === 'needs-permission' ? await reconnectLibraryHandle() : await chooseLibraryHandle();
+    if (h) {
+      await refreshLibraryStatus();
+      setStatus(`Conversarium folder: ${h.name}`, 'ok');
+    }
   } catch (e) {
     if (e && e.name === 'AbortError') return;
     setStatus(`Folder error: ${e.message}`, 'err');
   }
 }
 
-// THE LIST IS THE LIBRARY. Read every downloaded JSON and render it.
+async function chooseFolder() {
+  const st = await archiveStatus();
+  try {
+    if (st.state === 'needs-permission') {
+      const h = await reconnectArchiveHandle();
+      if (h) {
+        await refreshFolderStatus();
+        setStatus(`Vault folder: ${h.name}`, 'ok');
+      } else {
+        setStatus(`Access to "${st.name}" was not granted. Click the folder button to try again.`, 'warn');
+      }
+      return;
+    }
+    // 'granted' or 'none': always open the picker (R-10: Change folder
+    // must be possible even when a folder is already configured).
+    const handle = await chooseArchiveHandle();
+    await refreshFolderStatus();
+    if (handle) setStatus(`Vault folder: ${handle.name}`, 'ok');
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // cancelled — prior config preserved
+    setStatus(`Folder error: ${e.message}`, 'err');
+  }
+}
+
+// Get a usable Conversarium handle without surprising the user: current
+// grant wins; otherwise reconnect (permission prompt) or, on first use,
+// open the picker. Callers must be inside a user gesture when interactive.
+async function ensureLibrary() {
+  const current = await getCurrentLibraryHandle();
+  if (current) return current;
+  const st = await libraryStatus();
+  if (st.state === 'needs-permission') {
+    const h = await reconnectLibraryHandle();
+    if (h) {
+      await refreshLibraryStatus();
+      return h;
+    }
+    setStatus(`Access to "${st.name}" is needed. Click the Conversarium label to reconnect.`, 'warn');
+    return null;
+  }
+  const h = await chooseLibraryHandle();
+  if (h) await refreshLibraryStatus();
+  return h;
+}
+
+// THE LIST IS THE CONVERSARIUM. Read every downloaded JSON and render it.
 async function loadLibrary() {
-  const { envelopes, noLibrary } = await readLibraryEnvelopes();
+  const { envelopes, unreadable } = await readLibraryEnvelopes();
   libraryEnvs = envelopes.sort((a, b) =>
     (b.updated || b.created || '').localeCompare(a.updated || a.created || ''));
+  lastUnreadable = unreadable || [];
   searchState = buildSearchIndex(libraryEnvs);
   archivedCount = libraryEnvs.length;
   renderList();
-  setStatus(`${libraryEnvs.length} threads in the library.`, 'ok');
+  setStatus(`${libraryEnvs.length} threads in the Conversarium.`, 'ok');
 }
 
 // ChatGPT list pages — used by the download crawl and staleness checks only.
@@ -328,11 +406,14 @@ async function downloadAll() {
     return;
   }
 
-  const lib = await getLibraryHandle({ interactive: true }).catch(() => null);
-  if (!lib) {
-    setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
-    return;
+  let lib;
+  try {
+    lib = await ensureLibrary();
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // picker cancelled
+    throw e;
   }
+  if (!lib) return;
   await refreshLibraryStatus();
 
   bulkRunning = true;
@@ -343,14 +424,14 @@ async function downloadAll() {
   loadAllBtn.disabled = true;
 
   try {
-    setStatus('Crawling conversation list…');
-    progressSpin('crawling');
+    setStatus('Reading ChatGPT thread list…');
+    progressSpin('Reading ChatGPT thread list');
     const summaries = await fetchAllSummaries();
     if (!summaries.length) {
-      setStatus('No conversations found.', 'warn');
+      setStatus('No ChatGPT threads found — are you logged in?', 'warn');
       return;
     }
-    setStatus(`Found ${summaries.length} · checking the library…`);
+    setStatus(`Found ${summaries.length} on ChatGPT · checking the Conversarium…`);
 
     const libUpdated = new Map(libraryEnvs.map((e) => [e.id, e.updated || e.created || '']));
     const targets = summaries.filter((c) => {
@@ -371,7 +452,7 @@ async function downloadAll() {
     for (let i = 0; i < targets.length; i++) {
       if (bulkAbort) break;
       const c = targets[i];
-      setStatus(`Downloading ${i + 1}/${targets.length}: ${c.title}`, 'warn');
+      setStatus(`Importing ${i + 1}/${targets.length}: ${c.title}`, 'warn');
       downloadBtn.textContent = `⤓ ${i + 1}/${targets.length}`;
       try {
         const raw = await getConversation(c.id);
@@ -381,12 +462,12 @@ async function downloadAll() {
         consecutiveFails = 0;
       } catch (e) {
         if (e && (e.status === 401 || e.status === 403)) {
-          console.error(`[convo-hist ${BUILD}] download stopped at "${c.title}" (${c.id}): ${e.message}`);
-          setStatus(`Download stopped: ${e.message} — log in on chatgpt.com, then run Download again.`, 'err');
+          console.error(`[convo-hist ${BUILD}] import stopped at "${c.title}" (${c.id}): ${e.message}`);
+          setStatus(`Import stopped: ${e.message} — log in on chatgpt.com, then run Import again.`, 'err');
           return;
         }
         const msg = e && e.message ? e.message : String(e);
-        console.warn(`[convo-hist ${BUILD}] download failed: "${c.title}" (${c.id}) — ${msg}`);
+        console.warn(`[convo-hist ${BUILD}] import failed: "${c.title}" (${c.id}) — ${msg}`);
         if (failures.length < 3) failures.push(`${c.title}: ${msg}`);
         failed++;
         consecutiveFails++;
@@ -398,8 +479,8 @@ async function downloadAll() {
         if (e && e.retryAfterMs) await sleep(e.retryAfterMs);
         if (consecutiveFails >= 3) {
           setStatus(
-            `Download paused: 3 in a row failed (last: ${c.title} — ${msg}). ` +
-              `Downloaded threads are safe in the library; run Download again to resume.`,
+            `Import paused: 3 in a row failed (last: ${c.title} — ${msg}). ` +
+              `Saved threads are safe in the Conversarium; run Import again to resume.`,
             'err'
           );
           return;
@@ -408,31 +489,31 @@ async function downloadAll() {
       recentCount++;
       if (recentCount >= 10) { recentCount = 0; recentFails = 0; }
       if ((i + 1) % 25 === 0) {
-        console.log(`[convo-hist ${BUILD}] download progress: ${i + 1}/${targets.length}` +
+        console.log(`[convo-hist ${BUILD}] import progress: ${i + 1}/${targets.length}` +
           ` (new ${downloaded}, failed ${failed}, pacing ${pacing}ms)`);
       }
       progressUpdate(i + 1, targets.length, `${downloaded}/${targets.length}`);
       await sleep(pacing);
     }
 
-    await loadLibrary(); // the list IS the library — refresh it
+    await loadLibrary(); // the list IS the Conversarium — refresh it
 
-    const stopped = bulkAbort ? ' (stopped early — run Download again to resume)' : '';
+    const stopped = bulkAbort ? ' (stopped early — run Import again to resume)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
     setStatus(
-      `Download done: ${downloaded} new, ${unchanged} unchanged, ${failed} failed — ` +
-        `library holds ${libraryEnvs.length} threads${stopped}${reasonNote}.`,
+      `Import done: ${downloaded} new, ${unchanged} unchanged, ${failed} failed — ` +
+        `the Conversarium holds ${libraryEnvs.length} threads${stopped}${reasonNote}.`,
       failed ? 'warn' : 'ok'
     );
   } catch (e) {
-    setStatus(`Download failed: ${e.message}`, 'err');
+    setStatus(`Import failed: ${e.message}`, 'err');
   } finally {
     progressHide();
     bulkRunning = false;
     bulkAbort = false;
-    downloadBtn.textContent = 'Download';
+    downloadBtn.textContent = 'Import';
     updateButtons();
   }
 }
@@ -452,18 +533,24 @@ function exportTrigger() {
 }
 
 async function exportTargets(targets) {
-  const vault = await getArchiveHandle({ interactive: true }).catch(() => null);
+  let vault = await getCurrentArchiveHandle();
   if (!vault) {
-    setStatus('No vault folder granted — click 📁 (or ⚙ Settings).', 'err');
-    return;
+    const st = await archiveStatus();
+    if (st.state === 'needs-permission') vault = await reconnectArchiveHandle();
+    if (!vault) {
+      setStatus(st.state === 'needs-permission'
+        ? `Access to "${st.name}" is needed — click 📁 to reconnect.`
+        : 'No vault folder — click 📁 (or ⚙ Settings) to choose one.', 'err');
+      return;
+    }
   }
   await refreshFolderStatus();
-  const plain = await getPlainHandle({ interactive: true }).catch(() => null);
+  const plain = await getCurrentPlainHandle(); // optional; silently skipped when unset
   const st = await loadState();
   const plainFormat = st.plainFormat || 'md';
 
   if (!targets.length) {
-    setStatus('Library is empty — run Download first.', 'warn');
+    setStatus('The Conversarium is empty. Press Import to bring in ChatGPT threads.', 'warn');
     return;
   }
 
@@ -569,12 +656,26 @@ async function capture(chatId) {
     }
   }
 
-  const vault = await getArchiveHandle({ interactive: true }).catch(() => null);
+  const vault = await getCurrentArchiveHandle();
   if (!vault) {
-    setStatus('No vault folder granted — click 📁 first.', 'err');
-    return;
+    const ast = await archiveStatus();
+    if (ast.state === 'needs-permission') {
+      try {
+        const h = await reconnectArchiveHandle();
+        if (h) { await refreshFolderStatus(); setStatus(`Vault folder: ${h.name}`, 'ok'); }
+      } catch (e) {
+        if (e && e.name !== 'AbortError') setStatus(`Folder error: ${e.message}`, 'err');
+        return;
+      }
+    }
+    if (!(await getCurrentArchiveHandle())) {
+      setStatus(ast.state === 'needs-permission'
+        ? 'Vault access is needed — click 📁 to reconnect.'
+        : 'No vault folder — click 📁 first.', 'err');
+      return;
+    }
   }
-  const plain = await getPlainHandle({ interactive: true }).catch(() => null);
+  const plain = await getCurrentPlainHandle();
   const st = await loadState();
   const plainFormat = st.plainFormat || 'md';
 
@@ -601,7 +702,7 @@ async function capture(chatId) {
 async function copyThread(chatId, fmt) {
   const env = libraryEnvs.find((x) => x.id === chatId);
   if (!env) {
-    setStatus('Thread not in the library.', 'warn');
+    setStatus('Thread not in the Conversarium.', 'warn');
     return;
   }
   const text = fmt === 'json' ? JSON.stringify(env, null, 2) : renderMarkdown(env);
@@ -623,11 +724,14 @@ async function digestMissing() {
     return;
   }
 
-  const lib = await getLibraryHandle({ interactive: true }).catch(() => null);
-  if (!lib) {
-    setStatus('No library folder — open ⚙ Settings and choose one.', 'err');
-    return;
+  let lib;
+  try {
+    lib = await ensureLibrary();
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // picker cancelled
+    throw e;
   }
+  if (!lib) return;
   const targets = libraryEnvs.filter((env) => !env.summary || !(env.tags || []).length);
   if (!targets.length) {
     setStatus(`Nothing to digest — all ${libraryEnvs.length} threads already have summaries.`, 'ok');
@@ -721,11 +825,37 @@ function renderList() {
   updateSelAllState();
   updateButtons();
 
+  // R-11: folder/permission/empty conditions render their own state panels.
   if (!shown.length) {
-    listEl.innerHTML = `<div class="notice">${
-      q ? 'No matches in the library.' : 'Library is empty — run Download.'
-    }</div>`;
+    if (libState.state === 'none') {
+      listEl.innerHTML =
+        '<div class="notice">Choose a Conversarium folder to begin.' +
+        '<br><button class="ghost" data-action="choose-library">Choose folder…</button></div>';
+      return;
+    }
+    if (libState.state === 'needs-permission') {
+      listEl.innerHTML =
+        `<div class="notice">Reconnect "${escapeHtml(libState.name)}" to read your Conversarium.` +
+        '<br><button class="ghost" data-action="reconnect-library">Reconnect</button></div>';
+      return;
+    }
+    if (!q && !libraryEnvs.length) {
+      listEl.innerHTML = bulkRunning
+        ? '<div class="notice">Import is running. Threads will appear here as they are saved.</div>'
+        : '<div class="notice">The Conversarium is empty. Press Import to bring in ChatGPT threads.</div>';
+      return;
+    }
+    listEl.innerHTML = `<div class="notice">No Conversarium threads match "${escapeHtml(q)}".</div>`;
     return;
+  }
+
+  if (lastUnreadable.length) {
+    const details = lastUnreadable
+      .slice(0, 5)
+      .map((u) => `<div class="dim">${escapeHtml(u.name)} — ${escapeHtml(u.reason)}</div>`)
+      .join('');
+    listEl.innerHTML =
+      `<div class="notice">${lastUnreadable.length} file${lastUnreadable.length === 1 ? '' : 's'} could not be read${details ? ':' + details : '.'}</div>`;
   }
 
   for (const env of shown) {
@@ -787,7 +917,7 @@ function renderList() {
 function renderResults(q) {
   if (!searchState) {
     listEl.innerHTML =
-      '<div class="notice">Nothing indexed yet.<br>Run Download first.</div>';
+      '<div class="notice">Nothing indexed yet.<br>Press Import to bring in ChatGPT threads.</div>';
     return;
   }
 
@@ -795,7 +925,7 @@ function renderResults(q) {
   const results = searchArchive(searchState, q);
 
   if (!results.length) {
-    listEl.innerHTML = `<div class="notice">No matches in ${archivedCount} archived conversation${archivedCount === 1 ? '' : 's'}.</div>`;
+    listEl.innerHTML = `<div class="notice">No Conversarium threads match "${escapeHtml(q)}".</div>`;
     return;
   }
 

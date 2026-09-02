@@ -164,8 +164,21 @@
     }
   }
 
+  const pickerLog = []; // every showDirectoryPicker invocation: {id, cancelled}
+  let cancelNext = false;
+
+  window.__e2eFsCancelNextPicker = () => { cancelNext = true; };
+  window.__e2eFsPickerLog = () => JSON.stringify(pickerLog);
+
   window.showDirectoryPicker = async (opts) => {
     const id = (opts && opts.id) || 'default';
+    if (cancelNext) {
+      cancelNext = false;
+      pickerLog.push({ id, cancelled: true });
+      console.log(`[e2e-polyfill] showDirectoryPicker(id=${id}) -> user cancelled`);
+      throw new DOMException('The user aborted a request.', 'AbortError');
+    }
+    pickerLog.push({ id, cancelled: false });
     console.log(`[e2e-polyfill] showDirectoryPicker(id=${id}) -> in-memory root`, opts || '');
     return new FakeDirHandle(rootFor(id), '');
   };

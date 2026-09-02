@@ -53,6 +53,18 @@ func (s *mockState) count(label string) int {
 	return s.reqCounts[label]
 }
 
+// totalHits sums every recorded request — the A-01 "zero ChatGPT requests"
+// assertion uses this so no endpoint can slip through unlabeled.
+func (s *mockState) totalHits() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, v := range s.reqCounts {
+		n += v
+	}
+	return n
+}
+
 func (s *mockState) hit(label string) {
 	s.mu.Lock()
 	s.reqCounts[label]++
