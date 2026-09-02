@@ -163,11 +163,13 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--line);
 }
-.actions .primary { flex: 1; }
+.actions > button { min-width: 0; }
+.actions .primary { flex: 1 1 140px; }
 
 .status {
   padding: 8px 12px;

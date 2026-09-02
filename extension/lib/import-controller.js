@@ -254,8 +254,12 @@ async function importDetails(cp, signal) {
 
   spin('Importing from ChatGPT');
   const paintProgress = () => {
-    const done = cp.importJob.counters.saved + cp.importJob.counters.failed;
-    progress(done, total, `${done}/${total}`);
+    const c = cp.importJob.counters;
+    const done = c.saved + c.failed;
+    // R-06: one progress model — bar width AND label use processed/targets;
+    // saved/failed are reported separately.
+    const label = `Processed ${done} of ${total} · Saved ${c.saved} · Failed ${c.failed}`;
+    progress(done, total, label);
   };
   paintProgress();
 
@@ -292,6 +296,9 @@ async function importDetails(cp, signal) {
         const env = buildEnvelope(normalizeConversation(raw));
         await writeLibraryThread(env);
         disk.set(id, env.updated || have || '');
+        // R-05: live upsert — the panel shows the title before the import
+        // finishes (A-04), without re-reading the whole folder.
+        emit({ type: 'thread-saved', env });
         cp.importJob.attemptedIds.push(id);
         cp.importJob.counters.saved++;
         cp.importJob.pacing.delayMs = BASE_DELAY_MS; // success cools pacing back down

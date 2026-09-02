@@ -9,17 +9,17 @@
 <body>
   <header class="topbar">
     <div class="brand">Thread-O-matic <span id="build-label" class="build">build: loading…</span></div>
-    <button id="settings-btn" class="ghost" title="Open Settings — choose your folders, configure the local AI summarizer, and set output options.">⚙</button>
-    <button id="help-btn" class="ghost" title="Open Help — a full guide to every button, folder, and status message.">?</button>
-    <button id="folder-btn" class="ghost" title="Your vault folder — markdown exports are written here. Click to choose a folder, or to re-allow access if the browser dropped it.">
+    <button id="settings-btn" class="ghost" aria-label="Open Settings" title="Open Settings — choose your folders, configure the local AI summarizer, and set output options.">⚙</button>
+    <button id="help-btn" class="ghost" aria-label="Open Help" title="Open Help — a full guide to every button, folder, and status message.">?</button>
+    <button id="folder-btn" class="ghost" aria-label="Vault folder" title="Your vault folder — markdown exports are written here. Click to choose a folder, or to re-allow access if the browser dropped it.">
       <span id="folder-label">Vault folder…</span>
     </button>
   </header>
 
   <section class="searchbar">
     <div class="searchrow">
-      <input id="search" type="search" placeholder="Search the Conversarium…" title="Search inside every thread in the Conversarium. Filters: user: (your messages only), assistant: (replies only), code: (threads containing code blocks)." autofocus />
-      <button id="reload-btn" class="ghost" title="Reload Conversarium — re-reads the local folder from disk, picking up files you added or moved manually. This does not contact ChatGPT.">↻</button>
+      <input id="search" type="search" placeholder="Search the Conversarium…" aria-label="Search the Conversarium" title="Search inside every thread in the Conversarium. Filters: user: (your messages only), assistant: (replies only), code: (threads containing code blocks)." autofocus />
+      <button id="reload-btn" class="ghost" aria-label="Reload Conversarium" title="Reload Conversarium — re-reads the local folder from disk, picking up files you added or moved manually. This does not contact ChatGPT.">↻</button>
     </div>
     <span id="search-hint" class="hint">message-level search · filters: user: assistant: code:</span>
   </section>

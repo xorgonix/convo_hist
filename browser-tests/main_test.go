@@ -651,6 +651,214 @@ func TestA12_MalformedAnd404Reported(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// A-04 — The first saved title appears in the panel before the import
+// completes.
+
+func TestA04_FirstTitleAppearsLive(t *testing.T) {
+	s := startTest(t, "A-04", "First saved title appears mid-import", "A-case", withTotal(8))
+	s.waitStamp()
+	// Stall a later item so the import is still running when we observe
+	// the first saved title. gen-001 is the 4th item (i=3) in a total of 8.
+	s.state.convDelay["gen-001"] = 6 * time.Second
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitItems(1, 15*time.Second) // first .chat-item rendered
+	s.waitCheckpoint(`"state":"importing"`, 5*time.Second)
+	body := s.text("#chat-list")
+	if !strings.Contains(body, "Kubernetes Networking Deep Dive") {
+		s.failf("first title not in list while import still running; got %q", body)
+	}
+	s.evidence("A-04-live-title.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-05 — At every sampled point, the progress bar and the processed counter
+// represent the same numerator and denominator.
+
+func TestA05_BarAndCounterAgree(t *testing.T) {
+	s := startTest(t, "A-05", "Progress bar width and counter share the same metric", "A-case", withTotal(3))
+	s.waitStamp()
+	// Make each detail fetch slow enough to land samples between items.
+	for _, id := range []string{"conv-a", "conv-b", "conv-c"} {
+		s.state.convDelay[id] = 500 * time.Millisecond
+	}
+
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+	// (Sample loop runs while the import progresses.)
+	deadline := time.Now().Add(20 * time.Second)
+	mismatches := 0
+	for time.Now().Before(deadline) {
+		v := s.page.MustEval(`() => {
+          const bar = document.getElementById('bar-fill');
+          const lbl = document.getElementById('progress-label');
+          const width = bar.style.width;
+          const m = String(lbl.textContent).match(/Processed\s+(\d+)\s+of\s+(\d+)/);
+          return m ? { width, num: Number(m[1]), den: Number(m[2]) } : { width, num: 0, den: 0, none: true };
+        }`)
+		m := struct {
+			Width string `json:"width"`
+			Num   int    `json:"num"`
+			Den   int    `json:"den"`
+			None  bool   `json:"none"`
+		}{}
+		if err := json.Unmarshal([]byte(v.Str()), &m); err != nil {
+			continue
+		}
+		if m.None {
+			time.Sleep(150 * time.Millisecond)
+			continue
+		}
+		widthPct := 0
+		fmt.Sscanf(m.Width, "%d%%", &widthPct)
+		if m.Den > 0 {
+			expected := int(float64(m.Num) / float64(m.Den) * 100)
+			if abs(widthPct-expected) > 1 {
+				mismatches++
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if mismatches > 0 {
+		s.failf("bar/counter disagreed %d times during the import", mismatches)
+	}
+	s.logf("bar and processed counter agreed across every sample")
+	s.evidence("A-05-progress.png")
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// ---------------------------------------------------------------------------
+// A-20 — Message-level search remains active while new imports arrive and
+// after a selection change or Reload Conversarium.
+
+func TestA20_SearchSurvivesImportAndSelection(t *testing.T) {
+	s := startTest(t, "A-20", "Message search survives selection + reload", "A-case", withTotal(3))
+	s.waitStamp()
+	s.page.MustElement("#capture-btn").MustClick()
+	s.waitCheckpoint(`"state":"completed"`, 30*time.Second)
+
+	s.typeQuery("hydration")
+	s.waitResults(1, 8*time.Second)
+	if n := s.count(".result-card"); n != 1 {
+		s.failf("expected 1 result-card after search, got %d", n)
+	}
+
+	s.page.MustElement("#sel-all").MustClick()
+	time.Sleep(250 * time.Millisecond)
+	if n := s.count(".result-card"); n != 1 {
+		s.failf("selection change clobbered the message view: %d result-cards", n)
+	}
+	if n := s.count(".chat-item"); n != 0 {
+		s.failf("selection change switched back to title-only list: %d chat-items", n)
+	}
+
+	s.page.MustElement("#reload-btn").MustClick()
+	s.waitItems(0, 6*time.Second) // Re-ran renderCurrentView; query still in box
+	if n := s.count(".result-card"); n != 1 {
+		s.failf("Reload Conversarium clobbered the message view: %d result-cards", n)
+	}
+	s.clearQuery()
+	s.logf("message-level search survived selection change and Reload Conversarium")
+	s.evidence("A-20-search-survives.png")
+}
+
+// ---------------------------------------------------------------------------
+// A-23 — At 390×844 every primary action, Stop, progress, and status remain
+// reachable without horizontal overflow.
+
+func TestA23_NarrowViewport(t *testing.T) {
+	s := startTest(t, "A-23", "390x844: actions reachable, no overflow, Stop visible", "A-case",
+		withSize(390, 844))
+	s.waitStamp()
+	s.state.setListDelay(1500 * time.Millisecond) // import runs long enough to observe Stop
+	s.page.MustElement("#capture-btn").MustClick()
+
+	s.waitItems(0, 6*time.Second) // discovery: list still in flight, no rows yet
+	// Wait for the operation to actually start AND for the controller's
+	// first spin/progress event to un-hide the progress element.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !s.hasAttr("#stop-btn", "hidden") && !s.hasAttr("#progress", "hidden") {
+			break
+		}
+		time.Sleep(120 * time.Millisecond)
+	}
+	if hidden := s.hasAttr("#stop-btn", "hidden"); hidden {
+		s.failf("Stop import not visible during discovery (R-07)")
+	}
+	if hidden := s.hasAttr("#progress", "hidden"); hidden {
+		s.failf("progress element still hidden during discovery")
+	}
+
+	v := s.page.MustEval(`() => {
+      const root = document.documentElement;
+      const actions = document.querySelector('.actions');
+      const stop = document.getElementById('stop-btn');
+      const status = document.getElementById('status');
+      const progress = document.getElementById('progress');
+      const box = (el) => {
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { right: r.right, top: r.top, w: r.width, h: r.height, visible: r.width > 0 && r.height > 0 };
+      };
+      return JSON.stringify({
+        scrollW: root.scrollWidth,
+        clientW: root.clientWidth,
+        actions: box(actions),
+        stop: box(stop),
+        status: box(status),
+        progress: box(progress),
+      });
+    }`)
+	var m struct {
+		ScrollW int `json:"scrollW"`
+		ClientW int `json:"clientW"`
+		Actions struct {
+			Right   float64 `json:"right"`
+			Visible bool    `json:"visible"`
+		} `json:"actions"`
+		Stop struct {
+			Right   float64 `json:"right"`
+			Visible bool    `json:"visible"`
+		} `json:"stop"`
+		Status struct {
+			Right   float64 `json:"right"`
+			Visible bool    `json:"visible"`
+		} `json:"status"`
+		Progress struct {
+			Right   float64 `json:"right"`
+			Visible bool    `json:"visible"`
+		} `json:"progress"`
+	}
+	if err := json.Unmarshal([]byte(v.Str()), &m); err != nil {
+		s.failf("viewport metrics: %v", err)
+	}
+	if m.ScrollW > m.ClientW+2 {
+		s.failf("horizontal overflow at 390px: scrollWidth=%d clientWidth=%d", m.ScrollW, m.ClientW)
+	}
+	for name, b := range map[string]struct{ Right float64; Visible bool }{
+		"actions": {m.Actions.Right, m.Actions.Visible},
+		"stop":    {m.Stop.Right, m.Stop.Visible},
+		"status":  {m.Status.Right, m.Status.Visible},
+		"progress": {m.Progress.Right, m.Progress.Visible},
+	} {
+		if !b.Visible {
+			s.failf("%s not visible at 390x844", name)
+		}
+		if b.Right > float64(m.ClientW)+1 {
+			s.failf("%s extends beyond viewport: right=%.1f viewport=%d", name, b.Right, m.ClientW)
+		}
+	}
+	s.evidence("A-23-narrow.png")
+}
+
+// ---------------------------------------------------------------------------
 // results.json + report.md
 
 func writeResultsAndReport(exitCode int) {

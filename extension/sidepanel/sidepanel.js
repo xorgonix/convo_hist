@@ -78,7 +78,32 @@ let bulkAbort = false;
 let libState = { state: 'none', name: '' }; // last known Conversarium grant state (R-11 views)
 let lastUnreadable = [];  // files that failed to parse during the last scan (R-11)
 
+// Dedicated operation cancellation (R-07): import owns its own AbortController
+// inside the controller; export/digest own one here. The same Stop control
+// drives whichever operation is active.
+let opAbort = null;   // AbortController for the active export/digest run
+let opKind = null;    // 'export' | 'digest' | null
+let searchIndexDue = false; // throttled search-index rebuild (R-05)
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Abortable sleep for the export/digest loops — resolves immediately on
+// abort so the loop can break at the top without another wait.
+function abortableSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal && signal.aborted) return resolve();
+    const t = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(t);
+      resolve();
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 const isE2e = () => {
   try { return new URLSearchParams(location.search).has('e2e'); } catch { return false; }
 };
@@ -94,7 +119,10 @@ async function init() {
   setStatus(`Ready — build ${BUILD}`);
 
   downloadBtn.addEventListener('click', importClicked);
-  stopBtn.addEventListener('click', () => stopImport());
+  stopBtn.addEventListener('click', () => {
+    if (importRunning()) { stopImport(); return; }
+    if (opAbort) opAbort.abort();
+  });
   newImportBtn.addEventListener('click', async () => {
     if (importRunning()) return;
     if (!confirm('Discard the unfinished import checkpoint and start a fresh scan? Imported threads are kept.')) return;
@@ -106,11 +134,7 @@ async function init() {
   settingsBtn.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('settings/settings.html') }));
   $('help-btn').addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('help/help.html') }));
   moreBtn.addEventListener('click', () => loadConversations(nextOffset, true));
-  searchEl.addEventListener('input', () => {
-    const q = searchEl.value.trim();
-    if (!q) { renderList(); return; }
-    renderResults(q);
-  });
+  searchEl.addEventListener('input', renderCurrentView);
   folderBtn.addEventListener('click', chooseFolder);
   // Conversarium label: click to reconnect when the browser dropped access (R-10/R-11).
   libraryHint.addEventListener('click', ensureLibraryFromClick);
@@ -124,7 +148,7 @@ async function init() {
   selAllEl.addEventListener('change', () => {
     if (selAllEl.checked) for (const env of libraryEnvs) checkedIds.add(env.id);
     else checkedIds.clear();
-    renderList();
+    renderCurrentView();
   });
   loadAllBtn.addEventListener('click', loadAll);
 
@@ -159,7 +183,7 @@ async function init() {
   await refreshFolderStatus();
   await refreshLibraryStatus();
   await loadLibrary();
-  await refreshImportButtons();
+  await refreshOpButtons();
 
   // First-run coach: shown once, skippable, never again.
   if (!isE2e() && !(await getTourDone())) showCoach();
@@ -185,14 +209,18 @@ function onControllerEvent(evt) {
     case 'progress-hide':
       progressHide();
       break;
+    case 'thread-saved':
+      // R-05: live upsert — the title appears before the import completes.
+      upsertLive(evt.env);
+      break;
     case 'job-changed':
-      refreshImportButtons();
+      refreshOpButtons();
       break;
     case 'done':
       // Final local reconciliation on every exit path (R-05), then
       // re-assert the job summary (loadLibrary's count line must not
       // bury the result the user needs to see).
-      refreshImportButtons();
+      refreshOpButtons();
       loadLibrary().then(() => {
         if (evt.summary) setStatus(evt.summary.text, evt.summary.kind);
       });
@@ -202,17 +230,67 @@ function onControllerEvent(evt) {
   }
 }
 
-async function refreshImportButtons() {
+// R-05: upsert a just-saved thread into the in-memory list (no full re-read),
+// keep it sorted, and schedule a throttled re-render + search-index rebuild.
+function upsertLive(env) {
+  if (!env || !env.id) return;
+  const i = libraryEnvs.findIndex((x) => x.id === env.id);
+  if (i >= 0) libraryEnvs[i] = env;
+  else libraryEnvs.push(env);
+  libraryEnvs.sort((a, b) => (b.updated || b.created || '').localeCompare(a.updated || a.created || ''));
+  archivedCount = libraryEnvs.length;
+
+  // Throttled search-index rebuild: at most every 2s during a burst (R-05).
+  if (!searchIndexDue) {
+    searchIndexDue = true;
+    setTimeout(() => {
+      searchIndexDue = false;
+      searchState = buildSearchIndex(libraryEnvs);
+    }, 2000);
+  }
+  scheduleRender();
+}
+
+// R-05: no more than 4 renders/sec — the done handler triggers the final one.
+function scheduleRender() {
+  if (scheduleRender._t) return;
+  scheduleRender._t = setTimeout(() => {
+    scheduleRender._t = null;
+    renderCurrentView();
+  }, 250);
+}
+
+async function refreshOpButtons() {
   const running = importRunning();
   const resumable = running ? false : await importResumable();
   downloadBtn.textContent = running ? '⤓ …' : (resumable ? 'Resume import' : 'Import');
   downloadBtn.disabled = running;
-  stopBtn.hidden = !running;
   newImportBtn.hidden = !(resumable && !running);
   if (running) {
     moreBtn.hidden = true;
     digestBtn.disabled = true;
   }
+  updateStopButton();
+}
+
+// R-07: one dedicated Stop control, labelled for the active operation.
+function updateStopButton() {
+  if (importRunning()) {
+    stopBtn.textContent = 'Stop import';
+    stopBtn.hidden = false;
+    return;
+  }
+  if (opAbort && opKind === 'export') {
+    stopBtn.textContent = 'Stop export';
+    stopBtn.hidden = false;
+    return;
+  }
+  if (opAbort && opKind === 'digest') {
+    stopBtn.textContent = 'Stop digest';
+    stopBtn.hidden = false;
+    return;
+  }
+  stopBtn.hidden = true;
 }
 
 async function importClicked() {
@@ -414,7 +492,7 @@ async function loadLibrary() {
   lastUnreadable = unreadable || [];
   searchState = buildSearchIndex(libraryEnvs);
   archivedCount = libraryEnvs.length;
-  renderList();
+  renderCurrentView();
   setStatus(`${libraryEnvs.length} threads in the Conversarium.`, 'ok');
 }
 
@@ -472,11 +550,7 @@ function exportTrigger() {
     setStatus('An import is running — stop it first (Stop import).', 'warn');
     return;
   }
-  if (bulkRunning) {
-    bulkAbort = true;
-    setStatus('Stopping after the current export…', 'warn');
-    return;
-  }
+  if (bulkRunning) return; // dedicated Stop export handles cancellation
   // Selected threads win; otherwise everything in the library.
   const selected = libraryEnvs.filter((env) => checkedIds.has(env.id));
   exportTargets(selected.length ? selected : libraryEnvs);
@@ -506,6 +580,10 @@ async function exportTargets(targets) {
 
   bulkRunning = true;
   bulkAbort = false;
+  opAbort = new AbortController();
+  opKind = 'export';
+  updateStopButton();
+  const abortSig = opAbort.signal;
   downloadBtn.disabled = true;
   moreBtn.hidden = true;
   digestBtn.disabled = true;
@@ -520,10 +598,10 @@ async function exportTargets(targets) {
     let failed = 0;
     let consecutiveFails = 0;
     const failures = [];
-    progressUpdate(0, targets.length, `0/${targets.length}`);
+    progressUpdate(0, targets.length, `Processed 0 of ${targets.length}`);
 
     for (let i = 0; i < targets.length; i++) {
-      if (bulkAbort) break;
+      if (abortSig.aborted) break;
       const env = targets[i];
 
       // Before writing: compare against the current ChatGPT version.
@@ -562,11 +640,11 @@ async function exportTargets(targets) {
           return;
         }
       }
-      await sleep(120);
-      progressUpdate(i + 1, targets.length, `${exported}/${targets.length}`);
+      await abortableSleep(120, abortSig);
+      progressUpdate(i + 1, targets.length, `Processed ${exported + failed} of ${targets.length} · Saved ${exported} · Failed ${failed}`);
     }
 
-    const stopped = bulkAbort ? ' (stopped early — run Export again to resume)' : '';
+    const stopped = abortSig.aborted ? ' (stopped early — press Stop export again, or resume by running Export)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — open the panel console)` : ''}`
       : '';
@@ -580,8 +658,11 @@ async function exportTargets(targets) {
     progressHide();
     bulkRunning = false;
     bulkAbort = false;
+    opAbort = null;
+    opKind = null;
+    updateStopButton();
     updateButtons();
-    renderList();
+    renderCurrentView();
   }
 }
 
@@ -631,7 +712,7 @@ async function capture(chatId) {
     await writeArchiveFile(env, md);
     if (plain) await writePlainFile(env, md, plainFormat);
     exportedIds.add(chatId);
-    renderList();
+    renderCurrentView();
     try {
       await navigator.clipboard.writeText(md);
       setStatus(`Exported ${env.title} · copied to clipboard`, 'ok');
@@ -669,11 +750,7 @@ async function digestMissing() {
     setStatus('An import is running — stop it first (Stop import).', 'warn');
     return;
   }
-  if (bulkRunning) {
-    bulkAbort = true;
-    setStatus('Stopping after the current digest…', 'warn');
-    return;
-  }
+  if (bulkRunning) return; // dedicated Stop digest handles cancellation
 
   let lib;
   try {
@@ -691,6 +768,10 @@ async function digestMissing() {
 
   bulkRunning = true;
   bulkAbort = false;
+  opAbort = new AbortController();
+  opKind = 'digest';
+  updateStopButton();
+  const abortSig = opAbort.signal;
   downloadBtn.disabled = true;
   moreBtn.hidden = true;
   digestBtn.disabled = true;
@@ -704,7 +785,7 @@ async function digestMissing() {
 
   try {
     for (let i = 0; i < targets.length; i++) {
-      if (bulkAbort) break;
+      if (abortSig.aborted) break;
       const env = targets[i];
       setStatus(`Digesting ${i + 1}/${targets.length}: ${env.title}`, 'warn');
       try {
@@ -726,11 +807,11 @@ async function digestMissing() {
           return;
         }
       }
-      await sleep(300);
-      progressUpdate(i + 1, targets.length, `${done}/${targets.length}`);
+      await abortableSleep(300, abortSig);
+      progressUpdate(i + 1, targets.length, `Processed ${done + failed} of ${targets.length} · Saved ${done} · Failed ${failed}`);
     }
 
-    const stopped = bulkAbort ? ' (stopped early)' : '';
+    const stopped = abortSig.aborted ? ' (stopped early)' : '';
     const reasonNote = failed
       ? ` · first: ${failures[0]}${failed > 1 ? ` (+${failed - 1} more — console)` : ''}`
       : '';
@@ -745,8 +826,11 @@ async function digestMissing() {
     progressHide();
     bulkRunning = false;
     bulkAbort = false;
+    opAbort = null;
+    opKind = null;
+    updateStopButton();
     updateButtons();
-    renderList();
+    renderCurrentView();
   }
 }
 
@@ -763,13 +847,20 @@ function updateSelAllState() {
   selAllEl.indeterminate = n > 0 && n < libraryEnvs.length;
 }
 
-function renderList() {
-  const q = searchEl.value.trim().toLowerCase();
-  listEl.innerHTML = '';
+// R-12: a single decision point. Empty query -> Conversarium list (with the
+// folder/permission/empty state panels); non-empty query -> message-level
+// search results. Every rerender (selection change, live import, reload,
+// job completion) goes through here so the active view is never replaced
+// by a title-only list while a search is showing.
+function renderCurrentView() {
+  const q = searchEl.value.trim();
+  if (q) { renderResults(q); return; }
+  renderList();
+}
 
-  const shown = q
-    ? libraryEnvs.filter((env) => env.title.toLowerCase().includes(q))
-    : libraryEnvs;
+function renderList() {
+  listEl.innerHTML = '';
+  const shown = libraryEnvs;
 
   updateSelAllState();
   updateButtons();
@@ -788,14 +879,12 @@ function renderList() {
         '<br><button class="ghost" data-action="reconnect-library">Reconnect</button></div>';
       return;
     }
-    if (!q && !libraryEnvs.length) {
+    if (!libraryEnvs.length) {
       listEl.innerHTML = (bulkRunning || importRunning())
         ? '<div class="notice">Import is running. Threads will appear here as they are saved.</div>'
         : '<div class="notice">The Conversarium is empty. Press Import to bring in ChatGPT threads.</div>';
       return;
     }
-    listEl.innerHTML = `<div class="notice">No Conversarium threads match "${escapeHtml(q)}".</div>`;
-    return;
   }
 
   if (lastUnreadable.length) {
