@@ -1135,6 +1135,71 @@ func TestA22_TitleChangeCleanup(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Seed-from-export (Settings page): parse a ChatGPT conversations.json,
+// write Conversarium JSON locally, skip threads already on disk — zero
+// ChatGPT requests.
+
+func TestSeedFromExportFile(t *testing.T) {
+	s := startTest(t, "SEED", "Export-file seed: local bulk write, no re-transfer", "manual-adjacent", withTotal(3))
+	s.waitStamp()
+	s.openExtPage("settings/settings.html")
+	s.waitStamp()
+
+	// Pre-seed in THIS page context (fake FS roots are per-page): conv-b is
+	// already current on disk and must be skipped, untouched.
+	out := s.page.MustEval(`async () => {
+      const fs = await import(chrome.runtime.getURL('lib/fsaccess.js'));
+      await fs.chooseLibraryHandle();
+      await fs.writeLibraryThread({ id: 'conv-b', title: 'Sourdough Starter Guide',
+        created: '2026-08-22T00:00:00.000Z', updated: '2026-08-22T18:00:00.000Z' });
+      return 'ok';
+    }`)
+	if out.Str() != "ok" {
+		s.failf("pre-seed failed: %s", out.Str())
+	}
+
+	// Hand a synthetic conversations.json to the settings page file input via
+	// DataTransfer (Chromium supports assigning FileList this way).
+	exportJSON := `[
+      {"id":"conv-a","conversation_id":"conv-a","title":"Kubernetes Networking Deep Dive",
+       "create_time":1787184000,"update_time":1787220000,"current_node":"n2",
+       "mapping":{"n1":{"id":"n1","message":{"id":"m1","author":{"role":"user"},"create_time":1787184000,
+          "content":{"content_type":"text","parts":["How do CNI plugins route pod traffic?"]}},"parent":null},
+                  "n2":{"id":"n2","message":{"id":"m2","author":{"role":"assistant"},"create_time":1787184060,
+          "content":{"content_type":"text","parts":["CNI plugins program routing tables."]}},"parent":"n1"}}},
+      {"id":"conv-b","conversation_id":"conv-b","title":"Sourdough Starter Guide",
+       "create_time":1787356800,"update_time":1787421600,"current_node":"n1",
+       "mapping":{"n1":{"id":"n1","message":{"id":"m1","author":{"role":"user"},"create_time":1787356800,
+          "content":{"content_type":"text","parts":["Hydration ratios?"]}},"parent":null}}}
+    ]`
+
+	// The pre-seed above already granted+used the library handle in this
+	// page's module context, so the handler's `getCurrentLibraryHandle`
+	// check will succeed.
+	s.page.MustEval(`(json) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([json], 'conversations.json', { type: 'application/json' }));
+      document.getElementById('export-file').files = dt.files;
+    }`, exportJSON)
+	s.page.MustElement("#export-import-btn").MustClick()
+	s.waitStatus("1 written, 1 already current", "ok", 20*time.Second)
+
+	if n := s.state.totalHits(); n != 0 {
+		s.failf("export seed made %d ChatGPT request(s) — must be zero", n)
+	}
+	files := s.fsFilesIn("convo-library")
+	if len(files) != 2 {
+		s.failf("expected 2 Conversarium files, got %v", files)
+	}
+	joined := strings.Join(files, "\n")
+	if !strings.Contains(joined, "threads/Kubernetes Networking Deep Dive (conva).json") {
+		s.failf("conv-a file missing after seed: %v", files)
+	}
+	s.logf("seed wrote 1 new, skipped 1 current, zero network: %v", files)
+	s.evidence("SEED-export-import.png")
+}
+
+// ---------------------------------------------------------------------------
 // results.json + report.md
 
 func writeResultsAndReport(exitCode int) {

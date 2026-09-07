@@ -33,8 +33,12 @@ const MAX_PAGES = 200;              // R-04: safety limit pauses with a diagnost
 const BASE_DELAY_MS =
   (typeof location !== 'undefined' && new URLSearchParams(location.search).has('e2e'))
     ? 50 : 1400;
-const MAX_DELAY_MS = 12000;
-const MAX_CONSECUTIVE_429 = 5;      // pause after this many back-to-back 429s
+const MAX_DELAY_MS = 30000;
+// On the first 429: settle this many seconds before continuing, and keep the
+// sustained delay at least this slow until successes gradually cool it down.
+const FIRST_RATE_WAIT_MS = 5000;
+const FIRST_RATE_DELAY_MS = 4000;
+const MAX_CONSECUTIVE_429 = 5;      // only a full pause after this many back-to-back 429s
 const MAX_TRANSIENT_ATTEMPTS = 3;   // bounded retries per item (R-08)
 
 // Auto-resume after a rate-limit pause (requested behavior): the pause exists
@@ -150,16 +154,20 @@ async function pace(cp, signal) {
 
 async function applyRateLimitBackoff(cp, retryAfterMs) {
   const p = cp.importJob.pacing;
+  // On the FIRST 429, stop for a few seconds and resume slowly — the delay
+  // never falls below a floor after the first hit, so the account only
+  // cools gradually instead of bouncing straight back to full speed.
   p.delayMs = Math.min(Math.max(p.delayMs * 2, BASE_DELAY_MS), MAX_DELAY_MS);
-  const waitMs = Math.max(retryAfterMs || 0, p.delayMs);
+  p.delayMs = Math.max(p.delayMs, FIRST_RATE_DELAY_MS); // sustained floor
+  const waitMs = Math.max(retryAfterMs || 0, p.delayMs, FIRST_RATE_WAIT_MS);
   p.nextAllowedAt = Date.now() + waitMs;
   p.consecutiveTransientFailures++;
   await mutateCheckpoint((st) => {
     st.importJob.pacing = p;
   });
   status(
-    `Rate limited — waiting ${Math.round(waitMs / 1000)}s (safe to close the panel; ` +
-      'Resume import continues).',
+    `Rate limited — stopping ${Math.round(waitMs / 1000)}s, then continuing slowly ` +
+      '(safe to close the panel; Resume import continues).',
     'warn'
   );
 }
@@ -497,8 +505,17 @@ async function runJob({ fresh }) {
     } else {
       cp = await loadCheckpoint();
       cp.importJob.state = cp.chatgptList.complete ? 'importing' : 'discovering';
+      // Resume backoff: if we were paused by rate limiting, never fire the
+      // first request immediately on resume — add a settle delay on top of
+      // any persisted cooldown. Thirty seconds of silence is cheap insurance
+      // against re-arming the limiter.
+      if (cp.importJob.pauseReason === 'rate-limit') {
+        cp.importJob.pacing.nextAllowedAt = Math.max(
+          cp.importJob.pacing.nextAllowedAt || 0, Date.now() + 30_000);
+      }
       await mutateCheckpoint((st) => {
         st.importJob.state = cp.importJob.state;
+        st.importJob.pacing = cp.importJob.pacing;
       });
     }
 

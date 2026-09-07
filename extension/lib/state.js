@@ -30,6 +30,22 @@ function migrate(st) {
   return st;
 }
 
+// Last-known thread names, so the panel paints the list before the disk scan
+// finishes (the scan is authoritative and overwrites this). Lightweight
+// {id, title, updated} only — never message content.
+export async function saveListCache(envs) {
+  const st = await loadState();
+  st.listCache = (envs || [])
+    .slice(0, 5000)
+    .map((e) => ({ id: e.id, title: e.title, updated: e.updated || e.created || '' }));
+  await persist(st);
+}
+
+export async function loadListCache() {
+  const st = await loadState();
+  return Array.isArray(st.listCache) ? st.listCache : [];
+}
+
 export async function loadState() {
   if (cached) return cached;
   try {

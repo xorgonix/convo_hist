@@ -82,6 +82,14 @@ ChatGPT ──► Conversarium      Conversarium ──► Vault (markdown)
 ### Import
 - Nothing runs until you press **Import**. Opening the panel never contacts
   ChatGPT.
+- **Bulk first-time seed (optional, network-free):** if you have ChatGPT's
+  own "Export data" archive in Downloads, extract the zip and pick the
+  enclosed `conversations.json` in **⚙ Settings → Seed from a ChatGPT
+  export**. Every thread it contains is written straight into the
+  Conversarium without a single ChatGPT request — no pacing, no rate
+  limits. Afterwards, Import only fetches what changed since the export.
+  Threads already in the Conversarium are skipped unless the export copy
+  is newer.
 - Import discovers the thread list page by page, then fetches only missing
   or newer threads, pacing itself politely.
 - **Stop import** appears the moment an import starts and cancels

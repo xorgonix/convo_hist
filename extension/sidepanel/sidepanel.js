@@ -31,7 +31,7 @@ import {
 import { buildSearchIndex, searchArchive, parseQuery, makeSnippet, highlightHtml } from '../lib/search.js';
 import { formatTimestamp } from '../lib/envelope.js';
 import { listConversations, onStage, BUILD } from '../lib/transport.js';
-import { loadState, getTourDone, setTourDone } from '../lib/state.js';
+import { loadState, getTourDone, setTourDone, loadListCache, saveListCache } from '../lib/state.js';
 import {
   startNewImport, resumeImport, discardJob, stop as stopImport,
   isRunning as importRunning, hasResumable as importResumable, setEmitter,
@@ -179,6 +179,13 @@ async function init() {
 
   await refreshFolderStatus();
   await refreshLibraryStatus();
+  // Paint last-known thread names immediately, then let the disk scan
+  // overwrite with the authoritative list (avoids a blank panel on open).
+  const cache = await loadListCache();
+  if (cache.length) {
+    libraryEnvs = cache.map((c) => ({ id: c.id, title: c.title, updated: c.updated, turns: [] }));
+    renderList();
+  }
   await loadLibrary();
   await refreshOpButtons();
 
@@ -487,6 +494,7 @@ async function loadLibrary() {
   archivedCount = libraryEnvs.length;
   renderCurrentView();
   setStatus(`${libraryEnvs.length} threads in the Conversarium.`, 'ok');
+  saveListCache(libraryEnvs);
 }
 
 // ChatGPT list pages — manual list browsing only (Load more / Load all).

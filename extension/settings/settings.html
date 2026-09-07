@@ -65,6 +65,16 @@
     </div>
 
     <div class="card">
+      <h2>Seed from a ChatGPT export</h2>
+      <div class="note">If you used ChatGPT's "Export data" (Settings → Data controls → Export), you will have a zip in your Downloads. Extract it and pick the <code>conversations.json</code> inside — every thread in it is written into the Conversarium <b>without touching ChatGPT at all</b> (no rate limits). Threads already in the Conversarium are skipped unless the export copy is newer. Afterwards, press Import only for what changed since the export.</div>
+      <div class="row">
+        <input type="file" id="export-file" accept=".json,application/json" />
+        <button id="export-import-btn" class="ghost">Import export file…</button>
+      </div>
+      <div class="note" id="export-progress"></div>
+    </div>
+
+    <div class="card">
       <h2>Summarization &amp; tagging</h2>
       <div class="row">
         <label>Algorithm</label>

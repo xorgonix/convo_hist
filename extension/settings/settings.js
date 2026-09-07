@@ -26,7 +26,10 @@ import {
   forgetArchiveHandle, archiveStatus,
   choosePlainHandle, reconnectPlainHandle, getCurrentPlainHandle,
   forgetPlainHandle, plainStatus,
+  readLibraryEnvelopes, writeLibraryThread,
 } from '../lib/fsaccess.js';
+import { normalizeConversation } from '../lib/vendors/chatgpt.js';
+import { buildEnvelope } from '../lib/envelope.js';
 
 const $ = (id) => document.getElementById(id);
 $('build-label').textContent = BUILD;
@@ -114,6 +117,70 @@ async function refresh() {
     $(`${prefix}-forget`).hidden = st.state === 'none';
   }
 }
+
+// ---------------------------------------------------------------------------
+// Seed from a ChatGPT "Export data" file (conversations.json). Purely local:
+// parses the file the user picks and writes new/updated threads into the
+// Conversarium — zero ChatGPT requests, so no pacing and no rate limits.
+// Threads already on disk are skipped unless the export copy is NEWER
+// (same rule as the import diff: compare `updated` timestamps).
+
+$('export-import-btn').addEventListener('click', async () => {
+  const input = $('export-file');
+  const note = $('export-progress');
+  if (!input.files || !input.files.length) {
+    setStatus('Pick the conversations.json from your ChatGPT export zip first.', 'warn');
+    return;
+  }
+  if (!(await getCurrentLibraryHandle())) {
+    setStatus('Choose the Conversarium folder first (row above).', 'err');
+    return;
+  }
+  const btn = $('export-import-btn');
+  btn.disabled = true;
+  setStatus('Reading the export file…', 'warn');
+  try {
+    const text = await input.files[0].text();
+    const list = JSON.parse(text);
+    if (!Array.isArray(list)) throw new Error('expected an array of conversations');
+
+    const { envelopes } = await readLibraryEnvelopes();
+    const have = new Map(envelopes.map((e) => [e.id, e.updated || e.created || '']));
+
+    let written = 0, skipped = 0, bad = 0;
+    const badSamples = [];
+    for (let i = 0; i < list.length; i++) {
+      const raw = list[i];
+      const id = raw.conversation_id || raw.id || '';
+      const updated = raw.update_time
+        ? new Date(raw.update_time * 1000).toISOString()
+        : '';
+      if (id && have.has(id) && (!updated || have.get(id) >= updated)) {
+        skipped++;
+        continue;
+      }
+      try {
+        const env = buildEnvelope(normalizeConversation(raw));
+        await writeLibraryThread(env);
+        have.set(env.id, env.updated || env.created || '');
+        written++;
+      } catch (e) {
+        bad++;
+        if (badSamples.length < 3) badSamples.push(`${raw.title || id || '?'}: ${e.message}`);
+      }
+      if (i % 20 === 0) note.textContent = `${i + 1}/${list.length} — ${written} written, ${skipped} skipped, ${bad} unreadable`;
+      if (i % 50 === 0) await new Promise((r) => setTimeout(r)); // keep the page alive
+    }
+    const badNote = bad ? ` · ${bad} unreadable (${badSamples.join('; ')})` : '';
+    note.textContent = '';
+    setStatus(`Export import done: ${written} written, ${skipped} already current, ${bad} unreadable${badNote}.`, bad ? 'warn' : 'ok');
+  } catch (e) {
+    note.textContent = '';
+    setStatus(`Export import failed: ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 (async () => {
   const st = await loadState();
